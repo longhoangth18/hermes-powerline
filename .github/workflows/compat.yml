@@ -24,7 +24,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          node-version: 26 # Hermes requires node >= 26
 
       # Hermes has used both npm and pnpm; follow whichever lockfile is there.
       - name: Install Hermes node dependencies

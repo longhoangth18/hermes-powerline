@@ -16,7 +16,7 @@ A powerline-style status bar and prompt for the [Hermes Agent](https://github.co
 ## Requirements
 
 - Hermes Agent installed from source in `~/.hermes/hermes-agent` (the default installer layout), with its node dependencies.
-- `node`, `python3`, `rsync`, `git`, `bash`.
+- `node` (the version your Hermes needs; 26+ for current Hermes), `python3`, `rsync`, `git`, `bash`.
 - A [Nerd Font](https://www.nerdfonts.com) in your terminal. The regular (non-"Mono") variant draws the icons larger; `hermes-powerline bigicons off` tightens the spacing for the Mono variant.
 - Optional, macOS: [`macmon`](https://github.com/vladkens/macmon) for GPU and temperature. Without it the bar shows CPU, RAM and disk only.
 
