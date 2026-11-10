@@ -417,11 +417,11 @@ function PowerlineRule(p: StatusRuleProps) {
   const durPart = durOn ? sepW + durW : 0
 
   // Top-right block: folder › branch › clock, each its own grey step. It is
-  // only as wide as its content (never wider than the stats block below it).
+  // only as wide as its content, and never takes more than 45% of the row.
   const rCells: { bg: string; bold?: boolean; fg: string; text: string }[] = []
 
   if (sharedW > 0) {
-    const room = Math.max(0, Math.min(sharedW, Math.floor(width * 0.45)) - durPart)
+    const room = Math.max(0, Math.floor(width * 0.45) - durPart)
 
     if (title) {
       const bg = mono ? __plGray(6) : C.titleBg
