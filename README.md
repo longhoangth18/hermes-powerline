@@ -23,7 +23,7 @@ A powerline-style status bar and prompt for the [Hermes Agent](https://github.co
 ## Install
 
 ```sh
-git clone https://github.com/<you>/hermes-powerline.git
+git clone https://github.com/longhoangth18/hermes-powerline.git
 cd hermes-powerline
 ./install.sh
 hermes-powerline run        # instead of `hermes`
