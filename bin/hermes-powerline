@@ -24,7 +24,7 @@ OUT="$PL/tui"
 STAMP_FILE="$OUT/.pl-stamp"
 LOG="$PL/build.log"
 SELF="${BASH_SOURCE[0]}"
-INPUTS=(ui-tui/src ui-tui/packages ui-tui/package.json ui-tui/tsconfig.json ui-tui/scripts apps/shared scripts/build package.json package-lock.json tsconfig.json)
+INPUTS=(ui-tui/src ui-tui/packages ui-tui/package.json ui-tui/tsconfig.json ui-tui/scripts apps/shared scripts/build package.json package-lock.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json)
 
 usage() {
   cat <<'EOF'
@@ -74,7 +74,8 @@ compute_stamp() {
     node --version 2>/dev/null
     # Dependency state: right after `hermes update` Hermes may still be
     # installing node deps; once that lands the stamp changes → retry.
-    sha < "$REPO/node_modules/.package-lock.json" 2>/dev/null
+    # (npm writes .package-lock.json, pnpm writes .modules.yaml.)
+    cat "$REPO/node_modules/.package-lock.json" "$REPO/node_modules/.modules.yaml" 2>/dev/null | sha
     ls "$REPO/ui-tui/node_modules" 2>/dev/null
   } | sha | cut -c1-16
 }
@@ -99,7 +100,7 @@ stage_tree() {
   ln -s "$REPO/node_modules" "$stage/node_modules" || return 1
   ln -s "$REPO/apps/shared" "$stage/apps/shared" || return 1
   rsync -a "$REPO/scripts/build/" "$stage/scripts/build/" || return 1
-  for f in package.json package-lock.json tsconfig.json .npmrc pm/lock.json; do
+  for f in package.json package-lock.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json .npmrc pm/lock.json; do
     if [ -e "$REPO/$f" ]; then cp "$REPO/$f" "$stage/$f" || return 1; fi
   done
 

@@ -26,9 +26,16 @@ jobs:
         with:
           node-version: 22
 
+      # Hermes has used both npm and pnpm; follow whichever lockfile is there.
       - name: Install Hermes node dependencies
         working-directory: ${{ runner.temp }}/hermes-agent
-        run: npm ci --ignore-scripts
+        run: |
+          if [ -f pnpm-lock.yaml ]; then
+            corepack enable
+            pnpm install --frozen-lockfile --ignore-scripts
+          else
+            npm ci --ignore-scripts
+          fi
 
       - name: Shell syntax
         run: bash -n bin/hermes-powerline && bash -n install.sh && bash -n uninstall.sh
