@@ -1,0 +1,6 @@
+.DS_Store
+*.bak.*
+/tui/
+/.stage/
+/build.log
+/config.json

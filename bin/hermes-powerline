@@ -1,0 +1,364 @@
+#!/usr/bin/env bash
+# hermes-powerline — powerline-style status bar + prompt for the Hermes Agent TUI
+# that survives `hermes update`.
+#
+# How it works: Hermes has no plugin API for the TUI status bar, but it officially
+# supports running a prebuilt TUI from $HERMES_TUI_DIR. This script copies the
+# current Hermes TUI source into a staging dir OUTSIDE the git checkout, appends
+# our three source files to it, builds that into ~/.hermes/powerline/tui, and
+# launches Hermes with HERMES_TUI_DIR pointing there. The build is stamped with
+# the Hermes commit + source state; after an update the next launch rebuilds
+# automatically (a few seconds). If anything fails it falls back to the stock TUI.
+set -uo pipefail
+
+VERSION="1.0.0"
+
+HH="${HERMES_HOME:-$HOME/.hermes}"
+REPO="${HERMES_AGENT_DIR:-$HH/hermes-agent}"
+PL="${HERMES_POWERLINE_DIR:-$HH/powerline}"
+SRC_DIR="${HERMES_POWERLINE_SRC:-$PL}"
+SRC="$SRC_DIR/powerline.tsx"
+CONF="$PL/config.json"
+STAGE="$PL/.stage"
+OUT="$PL/tui"
+STAMP_FILE="$OUT/.pl-stamp"
+LOG="$PL/build.log"
+SELF="${BASH_SOURCE[0]}"
+INPUTS=(ui-tui/src ui-tui/packages ui-tui/package.json ui-tui/tsconfig.json ui-tui/scripts apps/shared scripts/build package.json package-lock.json tsconfig.json)
+
+usage() {
+  cat <<'EOF'
+hermes-powerline — powerline status bar + prompt for the Hermes Agent TUI
+
+  hermes-powerline run [hermes args…]   launch hermes with the powerline TUI (default)
+  hermes-powerline ensure               build if stale; print the TUI dir (exit 1 on failure)
+  hermes-powerline rebuild              force a rebuild
+  hermes-powerline doctor               dry run against the installed Hermes: inject,
+                                        typecheck our code, build — touches nothing live
+  hermes-powerline status               versions, stamps, config
+
+Look (all apply on the next launch):
+  palette mono|dracula|skin    colours (mono = grey ramp, dark → light; default)
+  edge '#RRGGBB'|off           colour of the ">" band between segments (default green)
+  style arrow|round|slant|flame
+  icons on|off                 Nerd Font icons
+  bigicons on|off              2-cell gap after icons, for full-size Nerd Font glyphs
+  prompt on|off                powerline composer prompt (user / host / agent)
+  cap slant|flat|round         left edge of the prompt
+  twoline on|off               prompt on its own row; input wraps from the left edge
+  sys on|off                   CPU/GPU/RAM/disk/temp on the prompt row
+  on|off                       powerline on / classic bar (same build)
+
+Environment:
+  HERMES_POWERLINE=0           classic bar for this launch
+  HERMES_HOME                  Hermes home (default ~/.hermes)
+  HERMES_AGENT_DIR             Hermes checkout (default $HERMES_HOME/hermes-agent)
+  HERMES_POWERLINE_DIR         build + config dir (default $HERMES_HOME/powerline)
+  HERMES_POWERLINE_SRC         where powerline.tsx / prompt.ts / promptPrefix.tsx live
+EOF
+}
+
+say() { printf '\033[38;2;95;215;95mhermes-powerline:\033[0m %s\n' "$*" >&2; }
+
+sha() { # portable sha1 of stdin
+  if command -v shasum >/dev/null 2>&1; then shasum; else sha1sum; fi
+}
+
+compute_stamp() {
+  {
+    echo "$VERSION"
+    git -C "$REPO" rev-parse HEAD 2>/dev/null || echo nogit
+    git -C "$REPO" status --porcelain -- "${INPUTS[@]}" 2>/dev/null
+    git -C "$REPO" diff -- "${INPUTS[@]}" 2>/dev/null | sha
+    cat "$SRC" "$SRC_DIR/prompt.ts" "$SRC_DIR/promptPrefix.tsx" "$SELF" 2>/dev/null | sha
+    node --version 2>/dev/null
+    # Dependency state: right after `hermes update` Hermes may still be
+    # installing node deps; once that lands the stamp changes → retry.
+    sha < "$REPO/node_modules/.package-lock.json" 2>/dev/null
+    ls "$REPO/ui-tui/node_modules" 2>/dev/null
+  } | sha | cut -c1-16
+}
+
+check_sources() {
+  local f
+  for f in "$SRC" "$SRC_DIR/prompt.ts" "$SRC_DIR/promptPrefix.tsx"; do
+    [ -f "$f" ] || { say "missing $f"; return 1; }
+  done
+  [ -f "$REPO/ui-tui/src/components/appChrome.tsx" ] || { say "Hermes TUI source not found in $REPO"; return 1; }
+}
+
+# stage_tree <dir> — copy the Hermes TUI source into <dir> and inject our code.
+# Prints progress on stdout. No `set -e` anywhere: callers run inside
+# `if x=$(…)`, where bash silently disables errexit. Every step checks itself.
+stage_tree() {
+  local stage="$1" f
+  rm -rf "$stage" || return 1
+  mkdir -p "$stage/apps" "$stage/scripts" "$stage/pm" || return 1
+  rsync -a --exclude '/dist' --exclude '/.dist-*' --exclude '/node_modules' "$REPO/ui-tui/" "$stage/ui-tui/" || return 1
+  ln -s "$REPO/ui-tui/node_modules" "$stage/ui-tui/node_modules" || return 1
+  ln -s "$REPO/node_modules" "$stage/node_modules" || return 1
+  ln -s "$REPO/apps/shared" "$stage/apps/shared" || return 1
+  rsync -a "$REPO/scripts/build/" "$stage/scripts/build/" || return 1
+  for f in package.json package-lock.json tsconfig.json .npmrc pm/lock.json; do
+    if [ -e "$REPO/$f" ]; then cp "$REPO/$f" "$stage/$f" || return 1; fi
+  done
+
+  # Inject: in each target, rename the stock symbol (exactly one anchor),
+  # check the private helpers our code reuses still exist, append our module
+  # (which re-defines the symbol and falls back to the renamed stock one).
+  # A changed anchor is a hard stop: better the stock bar than a broken one.
+  python3 -I - "$stage/ui-tui/src" "$SRC_DIR" "$stage/.pl-lines" <<'PY'
+import os, sys
+src, pl, lines_out = sys.argv[1], sys.argv[2], sys.argv[3]
+SPECS = [
+    ("components/appChrome.tsx", "powerline.tsx",
+     "export function StatusRule({", "function StatusRuleClassic({",
+     ("function FaceTicker(", "function SessionDuration(", "const modelLabel =",
+      "function ctxBarColor(", "function batteryLabel(", "function batteryColor(", "function noticeColor(",
+      "function SpawnHud(", "function displayStatus(", "interface StatusRuleProps",
+      "export const busyIndicatorWidth", "export const MAX_DURATION_WIDTH", "statusSessionCountLabel",
+      "$isStatusRuleOccluded", "fmtDuration", "compactNumber", "DEV_CREDITS_MODE", "stringWidth")),
+    ("lib/prompt.ts", "prompt.ts",
+     "export function composerPromptText(", "function composerPromptTextClassic(", ()),
+    ("components/appLayout.tsx", "promptPrefix.tsx",
+     "const PromptPrefix = memo(function PromptPrefix({", "const PromptPrefixClassic = memo(function PromptPrefix({",
+     (" memo,", "TERMUX_TUI_MODE", "<PromptPrefix ")),
+]
+# Extra one-shot insertions (exactly one anchor each). Two-line prompt: the
+# powerline row goes right above the composer's input rows.
+INSERTS = {
+    "components/appLayout.tsx": [
+        ("{composer.inputBuf.map((line, i) => (",
+         "<PlPromptLine cols={composer.cols} profileName={ui.info?.profile_name} shellMode={sh} />\n"
+         "            {composer.inputBuf.map((line, i) => ("),
+    ],
+}
+problems, done = [], []
+for rel, extra, anchor, repl, needs in SPECS:
+    target = os.path.join(src, rel)
+    try:
+        code = open(target, encoding="utf-8").read()
+    except OSError as e:
+        problems.append(f"{rel}: {e.strerror} — upstream moved or removed it")
+        continue
+    if code.count(anchor) != 1:
+        problems.append(f"{rel}: anchor {anchor!r} found {code.count(anchor)}x — upstream changed it")
+    for need in needs:
+        if need not in code:
+            problems.append(f"{rel}: {need!r} missing — upstream refactored it")
+    for a2, _ in INSERTS.get(rel, ()):
+        if code.count(a2) != 1:
+            problems.append(f"{rel}: anchor {a2!r} found {code.count(a2)}x — upstream changed it")
+    done.append((rel, extra, anchor, repl, target, code))
+if problems:
+    sys.exit("hermes-powerline is not compatible with this Hermes version:\n  " + "\n  ".join(problems))
+with open(lines_out, "w", encoding="utf-8") as out:
+    for rel, extra, anchor, repl, target, code in done:
+        code = code.replace(anchor, repl, 1)
+        for a2, r2 in INSERTS.get(rel, ()):
+            code = code.replace(a2, r2, 1)
+        out.write(f"{rel}\t{code.count(chr(10)) + 1}\n")  # lines before our code starts
+        code += "\n" + open(os.path.join(pl, extra), encoding="utf-8").read()
+        open(target, "w", encoding="utf-8").write(code)
+        print(f"injected {extra} into {rel}")
+PY
+}
+
+# typecheck <stage> — run tsc over the staged tree and report only the errors
+# inside OUR appended code (upstream's own type errors are not our business).
+typecheck() {
+  local stage="$1" tsc="$REPO/node_modules/.bin/tsc"
+  [ -x "$tsc" ] || tsc="$REPO/ui-tui/node_modules/.bin/tsc"
+  [ -x "$tsc" ] || { echo "typecheck: tsc not installed in $REPO — skipped"; return 0; }
+  "$tsc" --noEmit -p "$stage/ui-tui/tsconfig.json" >"$stage/.tsc.log" 2>&1
+  python3 -I - "$stage/.pl-lines" "$stage/.tsc.log" <<'PY'
+import re, sys
+starts = dict(l.rstrip("\n").split("\t") for l in open(sys.argv[1], encoding="utf-8") if "\t" in l)
+ours, total = [], 0
+for line in open(sys.argv[2], encoding="utf-8", errors="replace"):
+    m = re.match(r"(.+?)\((\d+),\d+\): error TS\d+", line)
+    if not m:
+        continue
+    total += 1
+    path = m.group(1).replace("\\", "/")
+    for rel, start in starts.items():
+        if path.endswith("src/" + rel) and int(m.group(2)) >= int(start):
+            ours.append(f"{rel}: our line {int(m.group(2)) - int(start) + 1}: {line.split(': error ', 1)[1].strip()}")
+print(f"typecheck: {len(ours)} error(s) in powerline code ({total} total incl. upstream)")
+for o in ours:
+    print("  " + o)
+sys.exit(1 if ours else 0)
+PY
+}
+
+build() {
+  local stamp="$1"
+  check_sources || return 1
+  mkdir -p "$PL" || return 1
+
+  say "building powerline TUI for Hermes $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null)… (log: $LOG)"
+  (
+    cd "$PL" || exit 1 # never build from inside the stage we're about to delete
+    stage_tree "$STAGE" || exit 1
+    # Type errors in OUR code mean a helper changed shape upstream: the bundle
+    # would still build but could misbehave at runtime. Stock bar instead.
+    typecheck "$STAGE" || exit 1
+    # Invalidate first: if the build dies half-way, the old build must never
+    # be mistaken for a fresh one.
+    rm -f "$STAMP_FILE"
+    node "$STAGE/scripts/build/tui.mjs" --source "$STAGE" --out "$OUT" || exit 1
+  ) >"$LOG" 2>&1
+  local rc=$?
+  if [ $rc -ne 0 ] || [ ! -f "$OUT/dist/entry.js" ]; then
+    say "build FAILED (see $LOG) — using the stock Hermes TUI this time"
+    tail -5 "$LOG" >&2
+    return 1
+  fi
+  echo "$stamp" > "$STAMP_FILE"
+  say "done"
+}
+
+# doctor — everything `build` does plus a typecheck, in a throwaway dir.
+doctor() {
+  check_sources || return 1
+  local tmp rc=0
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/hermes-powerline-doctor.XXXXXX")" || return 1
+  # Physical path: the build script's "am I the entry point" check compares
+  # real paths, and macOS temp dirs sit behind the /var → /private/var symlink.
+  tmp="$(cd "$tmp" && pwd -P)" || return 1
+  echo "hermes-powerline $VERSION · Hermes $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo '?') · node $(node --version 2>/dev/null || echo missing)"
+  if (cd "$tmp" && stage_tree "$tmp/stage"); then
+    echo "inject: ok"
+    if [ "${1:-}" != "--no-typecheck" ]; then
+      typecheck "$tmp/stage" || rc=1
+    fi
+    if node "$tmp/stage/scripts/build/tui.mjs" --source "$tmp/stage" --out "$tmp/out" >"$tmp/build.log" 2>&1 \
+      && [ -f "$tmp/out/dist/entry.js" ]; then
+      echo "build: ok"
+    else
+      echo "build: FAILED"; tail -15 "$tmp/build.log"; rc=1
+    fi
+  else
+    echo "inject: FAILED"; rc=1
+  fi
+  if [ -n "${HERMES_POWERLINE_KEEP:-}" ]; then echo "kept: $tmp"; else rm -rf "$tmp"; fi
+  if [ $rc -eq 0 ]; then echo "all good"; else echo "problems found — Hermes will use its stock TUI until this is fixed"; fi
+  return $rc
+}
+
+LOCK="$PL/.lock"
+unlock() { [ -d "$LOCK" ] && rmdir "$LOCK" 2>/dev/null; return 0; }
+lock() { # serialise builds (two windows right after an update)
+  local i
+  mkdir -p "$PL" 2>/dev/null
+  for i in $(seq 1 120); do
+    if mkdir "$LOCK" 2>/dev/null; then trap unlock EXIT; return 0; fi
+    # stale lock left by a crashed build (older than 3 min) → take it over
+    [ -n "$(find "$LOCK" -maxdepth 0 -mmin +3 2>/dev/null)" ] && unlock && continue
+    sleep 0.5
+  done
+  return 1
+}
+
+ensure() {
+  local stamp; stamp="$(compute_stamp)"
+  if [ -f "$OUT/dist/entry.js" ] && [ "$(cat "$STAMP_FILE" 2>/dev/null)" = "$stamp" ]; then
+    echo "$OUT"; return 0
+  fi
+  lock || { say "another build seems stuck — using the stock TUI this time"; return 1; }
+  # Someone else may have finished the build while we waited for the lock.
+  if [ -f "$OUT/dist/entry.js" ] && [ "$(cat "$STAMP_FILE" 2>/dev/null)" = "$stamp" ]; then
+    echo "$OUT"; return 0
+  fi
+  # A failed build for this exact stamp: don't retry on every launch.
+  if [ "$(cat "$PL/.failed-stamp" 2>/dev/null)" = "$stamp" ]; then
+    say "stock bar: the last powerline build failed for this Hermes version (log: $LOG)"
+    say "fix or update hermes-powerline, then: hermes-powerline rebuild   (details: hermes-powerline doctor)"
+    return 1
+  fi
+  if build "$stamp"; then
+    rm -f "$PL/.failed-stamp"; echo "$OUT"
+  else
+    echo "$stamp" > "$PL/.failed-stamp"; return 1
+  fi
+}
+
+set_conf() { # key json-value
+  mkdir -p "$PL" || return 1
+  python3 -I - "$CONF" "$1" "$2" <<'PY'
+import json, os, sys
+path, key, val = sys.argv[1], sys.argv[2], json.loads(sys.argv[3])
+try:
+    conf = json.load(open(path))
+    if not isinstance(conf, dict):
+        conf = {}
+except Exception:
+    conf = {}
+conf[key] = val
+tmp = path + ".tmp"
+with open(tmp, "w") as f:
+    json.dump(conf, f, indent=2)
+    f.write("\n")
+os.replace(tmp, path)
+print(json.dumps(conf))
+PY
+}
+
+onoff() { # key name value
+  case "$3" in
+    on) set_conf "$1" true ;;
+    off) set_conf "$1" false ;;
+    *) echo "usage: hermes-powerline $2 on|off" >&2; exit 2 ;;
+  esac
+}
+
+cmd="${1:-run}"; [ $# -gt 0 ] && shift
+case "$cmd" in
+  run)
+    command -v hermes >/dev/null 2>&1 || { say "hermes not found in PATH"; exit 127; }
+    if dir="$(ensure)"; then
+      exec env HERMES_TUI_DIR="$dir" HERMES_POWERLINE_CONF="$CONF" hermes "$@"
+    else
+      exec hermes "$@"
+    fi ;;
+  ensure)  ensure ;;
+  rebuild)
+    rm -f "$PL/.failed-stamp"
+    lock || { say "another build is running"; exit 1; }
+    build "$(compute_stamp)" ;;
+  doctor)  doctor "${1:-}" ;;
+  style)
+    case "${1:-}" in arrow|round|slant|flame) set_conf style "\"$1\"" ;; *) echo "usage: hermes-powerline style arrow|round|slant|flame" >&2; exit 2 ;; esac
+    say "style → $1 (applies on next launch)" ;;
+  cap)
+    case "${1:-}" in slant|flat|round) set_conf cap "\"$1\"" ;; *) echo "usage: hermes-powerline cap slant|flat|round" >&2; exit 2 ;; esac
+    say "prompt left cap → $1 (applies on next launch)" ;;
+  palette)
+    case "${1:-}" in mono|dracula|skin) set_conf palette "\"$1\"" ;; *) echo "usage: hermes-powerline palette mono|dracula|skin" >&2; exit 2 ;; esac
+    say "palette → $1 (applies on next launch)" ;;
+  edge)
+    case "${1:-}" in
+      off) set_conf edge false ;;
+      \#[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) set_conf edge "\"$1\"" ;;
+      *) echo "usage: hermes-powerline edge '#RRGGBB'|off" >&2; exit 2 ;;
+    esac
+    say "separator edge → $1 (applies on next launch)" ;;
+  twoline)  onoff twoLine twoline "${1:-}"; say "two-line prompt → $1 (applies on next launch)" ;;
+  sys)      onoff sys sys "${1:-}"; say "system stats on the prompt row → $1 (applies on next launch)" ;;
+  bigicons) onoff bigIcons bigicons "${1:-}"; say "big-icon spacing → $1 (applies on next launch)" ;;
+  icons)    onoff icons icons "${1:-}" ;;
+  prompt)   onoff prompt prompt "${1:-}" ;;
+  on)  set_conf enabled true ;;
+  off) set_conf enabled false ;;
+  status)
+    echo "hermes-powerline : $VERSION"
+    echo "hermes commit    : $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo '?')"
+    echo "sources          : $SRC_DIR"
+    echo "wanted stamp     : $(compute_stamp)"
+    echo "built stamp      : $(cat "$STAMP_FILE" 2>/dev/null || echo none)"
+    [ -f "$PL/.failed-stamp" ] && echo "last build       : FAILED for stamp $(cat "$PL/.failed-stamp") (see $LOG)"
+    echo "config           : $(cat "$CONF" 2>/dev/null || echo '{} (defaults)')" ;;
+  version|--version|-v) echo "$VERSION" ;;
+  help|--help|-h) usage ;;
+  *) usage >&2; exit 2 ;;
+esac
