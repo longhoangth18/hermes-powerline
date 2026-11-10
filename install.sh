@@ -32,6 +32,23 @@ for f in powerline.tsx prompt.ts promptPrefix.tsx; do put "$HERE/src/$f" "$PL/$f
 put "$HERE/bin/hermes-powerline" "$BIN/hermes-powerline"
 chmod +x "$HERE/bin/hermes-powerline"
 
+# powerline-net: Hermes plugin feeding real per-call t/s, time-to-first-token and API errors.
+NET="$HH/plugins/powerline-net"
+mkdir -p "$HH/plugins"
+# A backup must NOT stay in the plugins dir: Hermes would load it (same manifest name, and the
+# later directory in sort order wins) instead of the fresh copy. Old copies go to $PL.
+if [ -e "$NET" ] && [ ! -L "$NET" ]; then mv "$NET" "$PL/powerline-net.plugin.bak.$(date +%Y%m%d%H%M%S)"; fi
+rm -f "$NET"
+if [ "$MODE" = "link" ]; then
+  ln -s "$HERE/plugin/powerline-net" "$NET"
+else
+  mkdir -p "$NET" && cp "$HERE/plugin/powerline-net/__init__.py" "$HERE/plugin/powerline-net/plugin.yaml" "$NET/"
+fi
+if command -v hermes >/dev/null 2>&1; then
+  hermes plugins enable powerline-net >/dev/null 2>&1 && echo "enabled Hermes plugin powerline-net" ||
+    echo "note: enable it with: hermes plugins enable powerline-net"
+fi
+
 echo "installed ($MODE) → $PL and $BIN/hermes-powerline"
 case ":$PATH:" in *":$BIN:"*) ;; *) echo "note: $BIN is not in your PATH" ;; esac
 

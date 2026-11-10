@@ -4,3 +4,5 @@
 /.stage/
 /build.log
 /config.json
+__pycache__/
+*.pyc

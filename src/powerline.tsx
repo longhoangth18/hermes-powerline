@@ -5,8 +5,9 @@
 // `hermes update` never touches it). Appended to components/appChrome.tsx so it
 // can reuse that module's private helpers (FaceTicker, SessionDuration, …).
 // ═══════════════════════════════════════════════════════════════════════
-import { readFileSync as __plReadFileSync } from 'node:fs'
+import { readFileSync as __plReadFileSync, statSync as __plStatSync } from 'node:fs'
 import { Component as __PlComponent } from 'react'
+import { $uiState as __plUiState } from '../app/uiStore.js'
 import { homedir as __plHomedir } from 'node:os'
 import { join as __plJoin } from 'node:path'
 
@@ -99,8 +100,220 @@ interface PlSeg {
   render?: (bg: string) => ReactNode
   /** Grey palette only: alarm / accent text instead of plain ink. */
   tone?: __PlTone
+  /** Keep bg/fg as given even on the grey ramp (alarms must stay red). */
+  fixed?: boolean
   w: number
 }
+
+// ── per-request speed + API errors (fed by the powerline-net Hermes plugin) ──
+// Hermes' own avg_tps is sum(out)/sum(latency) over the last 10 calls, latency
+// including the wait for the first token, so it is a blend, not the speed the
+// model generates at. The plugin records each call's exact timings instead.
+interface PlNetErr {
+  after_s?: number
+  at: number
+  code: null | number
+  max?: null | number
+  msg?: string
+  n: number
+  ok_at?: number
+  reason?: null | string
+  retry?: null | number
+  retryable?: boolean | null
+  type?: null | string
+}
+
+interface PlNet {
+  calls: number
+  err: null | PlNetErr
+  errors: number
+  last: null | {
+    at: number
+    gen: null | number
+    out: number
+    streamed: boolean
+    tps: null | number
+    tps_streamed?: boolean | null
+    ttft: null | number
+  }
+  recovered: null | PlNetErr
+}
+
+const PL_NET_DIR =
+  process.env.HERMES_POWERLINE_NET_DIR?.trim() || __plJoin(__plHomedir(), '.cache', 'hermes-powerline', 'net')
+
+/** How long a recovered error stays on the bar (dimmed) after the retry succeeded. */
+const PL_RECOVERED_MS = 60_000
+/** An unrecovered error from an idle session older than this is history, not news. */
+const PL_ERR_STALE_MS = 15 * 60_000
+
+const plNetFile = (id: string) => __plJoin(PL_NET_DIR, `${id.replace(/[^\w.-]/g, '').slice(0, 120)}.json`)
+
+function usePlNet(): null | PlNet {
+  const [net, setNet] = useState<null | PlNet>(null)
+  const [, setTick] = useState(0)
+  const isOccluded = useStore($isStatusRuleOccluded)
+  const seen = useRef('')
+  const shown = useRef('')
+
+  useEffect(() => {
+    if (isOccluded) {
+      return
+    }
+
+    // Fresh mount (e.g. after an overlay hid the bar): re-read even if the file is unchanged,
+    // or `cur` stays null and the expiry re-render below never fires.
+    let cur: null | PlNet = null
+    let dirSeen = ''
+    seen.current = ''
+
+    const poll = () => {
+      const ui = __plUiState.get()
+      const ids = [...new Set([ui.sid, ui.storedSid, ui.info?.stored_session_id])].filter((x): x is string => !!x)
+      // One stat of the directory per tick: the plugin writes by rename, which bumps the
+      // directory's mtime, so the per-file stats only run when something actually changed.
+      let dirKey = ids.join('|')
+
+      try {
+        dirKey += `:${__plStatSync(PL_NET_DIR).mtimeMs}`
+      } catch {
+        dirKey += ':none'
+      }
+
+      const changed = dirKey !== dirSeen
+      dirSeen = dirKey
+      let best: null | { m: number; p: string } = null
+
+      for (const id of changed ? ids : []) {
+        const p = plNetFile(id)
+
+        try {
+          const m = __plStatSync(p).mtimeMs
+
+          if (!best || m > best.m) {
+            best = { m, p }
+          }
+        } catch {
+          // no data for this id yet
+        }
+      }
+
+      const key = best ? `${best.p}:${best.m}` : ''
+
+      if (changed && key !== seen.current) {
+        seen.current = key
+
+        if (!best) {
+          cur = null
+          setNet(null)
+        } else {
+          try {
+            cur = JSON.parse(__plReadFileSync(best.p, 'utf8')) as PlNet
+            setNet(cur)
+          } catch {
+            seen.current = '' // unreadable: retry next tick
+            dirSeen = ''
+          }
+        }
+      }
+
+      // Re-render when a recovered badge expires or an idle error goes stale.
+      const now = Date.now()
+      const vis = `${cur?.recovered && now - (cur.recovered.ok_at ?? 0) * 1000 < PL_RECOVERED_MS}:${cur?.err && now - cur.err.at * 1000 < PL_ERR_STALE_MS}`
+
+      if (vis !== shown.current) {
+        shown.current = vis
+        setTick(n => n + 1)
+      }
+    }
+
+    poll()
+    const id = setInterval(poll, 500)
+
+    return () => clearInterval(id)
+  }, [isOccluded])
+
+  return net
+}
+
+const PL_ERR_SHORT: Record<string, string> = {
+  auth: 'auth',
+  auth_permanent: 'auth',
+  billing: 'billing',
+  content_policy_blocked: 'policy',
+  context_overflow: 'ctx full',
+  format_error: 'bad req',
+  model_not_found: 'no model',
+  overloaded: 'overload',
+  payload_too_large: 'too big',
+  rate_limit: 'rate limit',
+  server_error: 'server',
+  timeout: 'timeout',
+  upstream_blocked: 'blocked',
+  upstream_rate_limit: 'upstream 429'
+}
+
+type PlErrKind = 'client' | 'net' | 'rate' | 'server'
+
+/** Timeouts and dropped connections: no HTTP status, the transport failed. */
+const plIsNet = (e: PlNetErr) =>
+  e.code == null && (e.reason === 'timeout' || /connect|network|timeout|remoteprotocol|readerror/i.test(e.type ?? ''))
+
+function plErrKind(e: PlNetErr): PlErrKind {
+  const r = e.reason ?? ''
+
+  if (e.code === 429 || r === 'rate_limit' || r === 'upstream_rate_limit') {
+    return 'rate'
+  }
+
+  if ((e.code != null && e.code >= 500) || r === 'overloaded' || r === 'server_error') {
+    return 'server'
+  }
+
+  // Everything else — 4xx, and status-less refusals such as a content-policy block or an
+  // invalid response — is "the request was rejected", not a network problem.
+  return plIsNet(e) ? 'net' : 'client'
+}
+
+/** Short reason: the known table, else Hermes' own reason name, else ''. */
+const plWhy = (e: PlNetErr) => {
+  const r = e.reason ?? ''
+
+  return PL_ERR_SHORT[r] ?? (r && r !== 'unknown' ? r.replace(/_/g, ' ').slice(0, 16) : '')
+}
+
+// xterm-256 exact colours (tmux / Termius here are 256-colour): 160 red, 208 orange, 134 purple, 166 rust.
+const PL_ERR_BG: Record<PlErrKind, { bg: string; fg: string }> = {
+  client: { bg: '#AF5FD7', fg: '#FFFFFF' },
+  net: { bg: '#D75F00', fg: '#FFFFFF' },
+  rate: { bg: '#FF8700', fg: '#000000' },
+  server: { bg: '#D70000', fg: '#FFFFFF' }
+}
+
+/** "503 overload ↻2/3 ×2"; `short` drops everything but the code. */
+function plErrText(e: PlNetErr, short: boolean): string {
+  const net = plIsNet(e)
+  const head =
+    e.code != null
+      ? String(e.code)
+      : net
+        ? e.reason === 'timeout' || /timeout/i.test(e.type ?? '') ? 'timeout' : 'conn'
+        : plWhy(e) || 'error'
+
+  if (short) {
+    return head
+  }
+
+  // With a status code the reason follows it; without one the head already is the reason.
+  const why = e.code != null ? plWhy(e) : ''
+  const attempt = e.retry != null && e.max && e.retryable !== false ? ` ↻${e.retry + 1}/${e.max}` : ''
+  // Consecutive failures — only when the retry counter does not already say it.
+  const streak = !attempt && e.n > 1 ? ` ×${e.n}` : ''
+
+  return `${head}${why ? ` ${why}` : ''}${attempt}${streak}`
+}
+
+const plRate = (v: number) => (v < 10 ? v.toFixed(1) : String(Math.round(v)))
 
 const plBar = (pct: number, w: number) => {
   const filled = Math.round((Math.max(0, Math.min(100, pct)) / 100) * w)
@@ -263,6 +476,7 @@ function plTruncStart(s: string, w: number): string {
 
 function PowerlineRule(p: StatusRuleProps) {
   const { busy, cols, t, usage } = p
+  const net = usePlNet()
   const T = messages()
   const sep = PL_SEPS[PL_CONF.style] ?? PL_SEPS.arrow
   // Icon + gap (2 cells by default, so full-size Nerd Font glyphs have room).
@@ -331,6 +545,32 @@ function PowerlineRule(p: StatusRuleProps) {
     pinned.push({ bg, bold: true, fg: dark, key: 'status', node: txt, tone, w: stringWidth(txt) })
   }
 
+  let errShort = ''
+  // API error (HTTP 4xx/5xx, timeout, connection): pinned right after the
+  // status so it is never budgeted away. Live = solid alarm colour; after the
+  // retry succeeds it stays for a minute, dimmed, so a quick blip is still seen.
+  const nowMs = Date.now()
+  // Live while recent, or while the turn that raised it is still running (a long turn can
+  // outlast the stale window). An old error is NOT revived just because a new turn started.
+  const liveErr =
+    net?.err &&
+    (nowMs - net.err.at * 1000 < PL_ERR_STALE_MS || (busy && p.turnStartedAt != null && net.err.at * 1000 >= p.turnStartedAt))
+      ? net.err
+      : null
+  const pastErr = !liveErr && net?.recovered && nowMs - (net.recovered.ok_at ?? 0) * 1000 < PL_RECOVERED_MS ? net.recovered : null
+
+  if (liveErr || pastErr) {
+    const e = (liveErr ?? pastErr)!
+    const kind = plErrKind(e)
+    const colors = liveErr ? PL_ERR_BG[kind] : { bg: '#3A3A3A', fg: PL_ERR_BG[kind].bg }
+    const icon = PL_CONF.icons ? ic(liveErr ? '\u{f0026}' : '↺') : liveErr ? '! ' : '~ '
+    // Recovered: the retry counter is history — code + reason is the news.
+    const txt = `${icon}${plErrText(liveErr ? e : { ...e, retry: null }, false)}`
+
+    pinned.push({ bg: colors.bg, bold: !!liveErr, fg: colors.fg, fixed: true, key: 'apierr', node: txt, w: stringWidth(txt) })
+    errShort = `${icon}${plErrText(e, true)}`
+  }
+
   if (DEV_CREDITS_MODE) {
     pinned.push({ bg: C.warn, fg: dark, key: 'devmode', node: T.status.devCredits, w: stringWidth(T.status.devCredits) })
   }
@@ -373,6 +613,13 @@ function PowerlineRule(p: StatusRuleProps) {
     if (yolo) {
       yolo.node = PL_WARN
       yolo.w = stringWidth(PL_WARN)
+    }
+
+    const apiErr = pinned.find(s => s.key === 'apierr')
+
+    if (apiErr && errShort) {
+      apiErr.node = errShort
+      apiErr.w = stringWidth(errShort)
     }
   }
 
@@ -509,8 +756,17 @@ function PowerlineRule(p: StatusRuleProps) {
     }
   }
 
-  // Metrics first: tokens/s is the reason this bar exists.
-  const tps = typeof usage.avg_tps === 'number' ? `${ic('\u{f04c5}')}${usage.avg_tps < 10 ? usage.avg_tps.toFixed(1) : Math.round(usage.avg_tps)} t/s` : ''
+  // Metrics first: tokens/s is the reason this bar exists. With the plugin it
+  // is the LAST call's generation speed (output tokens / time after the first
+  // chunk); without it, Hermes' blended 10-call average, marked with ≈.
+  // A non-streamed call has no first-chunk time, so its rate is end-to-end: marked ≈ too.
+  const lastTps = net?.last?.tps
+  const tps =
+    typeof lastTps === 'number' && lastTps > 0
+      ? `${ic('\u{f04c5}')}${net?.last?.tps_streamed === false ? '\u2248' : ''}${plRate(lastTps)} t/s`
+      : typeof usage.avg_tps === 'number'
+        ? `${ic('\u{f04c5}')}≈${plRate(usage.avg_tps)} t/s`
+        : ''
 
   if (tps && ok('tps')) {
     add({ bg: C.tpsBg, bold: true, fg: PL_CONF.palette !== 'skin' ? dark : t.color.label, key: 'tps', node: tps, w: stringWidth(tps) })
@@ -524,8 +780,13 @@ function PowerlineRule(p: StatusRuleProps) {
     add({ bg: C.cacheBg(usage.cache_hit_pct), fg: dracula ? dark : c, key: 'cache', node: txt, w: stringWidth(txt) })
   }
 
-  if (typeof usage.avg_latency_s === 'number' && ok('latency')) {
-    const txt = `${ic('\u{f051f}') || '◷ '}${usage.avg_latency_s.toFixed(1)}s` // nf-md-timer_sand
+  // Latency: the last call's time to first token (prefill + queue) — the part
+  // the t/s figure above deliberately leaves out. Fallback: Hermes' average.
+  const ttft = net?.last?.ttft
+  const lat = typeof ttft === 'number' ? ttft : typeof usage.avg_latency_s === 'number' ? usage.avg_latency_s : null
+
+  if (lat != null && ok('latency')) {
+    const txt = `${ic('\u{f051f}') || '◷ '}${typeof ttft === 'number' ? '' : '≈'}${lat.toFixed(1)}s` // nf-md-timer_sand
 
     add({ bg: C.latencyBg, fg: PL_CONF.palette !== 'skin' ? dark : light, key: 'latency', node: txt, w: stringWidth(txt) })
   }
@@ -635,6 +896,10 @@ function PowerlineRule(p: StatusRuleProps) {
   // Grey palette: walk the ramp dark → light, left to right.
   if (mono) {
     left.forEach((seg, i) => {
+      if (seg.fixed) {
+        return
+      }
+
       seg.bg = __plLeftGray(i, left.length)
       seg.fg = seg.tone ? __plTone(seg.tone, seg.bg) : __plInk(seg.bg)
 

@@ -1,0 +1,7 @@
+name: powerline-net
+version: 1.0.0
+description: "Feeds the hermes-powerline status bar: real per-request generation speed (output tokens / time after the first chunk), time to first token, and API errors (HTTP 4xx/5xx, timeouts) with retry count. Observer only."
+author: "Long Hoang Trinh"
+provides_hooks:
+  - post_api_request
+  - api_request_error
