@@ -1,0 +1,41 @@
+# Checks hermes-powerline against the latest Hermes Agent every day, so an
+# upstream change that breaks the injection shows up here before it shows up
+# in someone's terminal.
+name: compat
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  doctor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch Hermes Agent (main)
+        run: git clone --depth 1 https://github.com/NousResearch/hermes-agent.git "$RUNNER_TEMP/hermes-agent"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Hermes node dependencies
+        working-directory: ${{ runner.temp }}/hermes-agent
+        run: npm ci --ignore-scripts
+
+      - name: Shell syntax
+        run: bash -n bin/hermes-powerline && bash -n install.sh && bash -n uninstall.sh
+
+      - name: Inject, typecheck, build
+        env:
+          HERMES_AGENT_DIR: ${{ runner.temp }}/hermes-agent
+          HERMES_POWERLINE_DIR: ${{ runner.temp }}/powerline
+          HERMES_POWERLINE_SRC: ${{ github.workspace }}/src
+        run: bin/hermes-powerline doctor
