@@ -171,8 +171,9 @@ typecheck() {
   local stage="$1" tsc="$REPO/node_modules/.bin/tsc"
   [ -x "$tsc" ] || tsc="$REPO/ui-tui/node_modules/.bin/tsc"
   [ -x "$tsc" ] || { echo "typecheck: tsc not installed in $REPO — skipped"; return 0; }
-  "$tsc" --noEmit -p "$stage/ui-tui/tsconfig.json" >"$stage/.tsc.log" 2>&1
-  python3 -I - "$stage/.pl-lines" "$stage/.tsc.log" <<'PY'
+  local tsc_rc=0
+  "$tsc" --noEmit -p "$stage/ui-tui/tsconfig.json" >"$stage/.tsc.log" 2>&1 || tsc_rc=$?
+  python3 -I - "$stage/.pl-lines" "$stage/.tsc.log" "$tsc_rc" <<'PY'
 import re, sys
 starts = dict(l.rstrip("\n").split("\t") for l in open(sys.argv[1], encoding="utf-8") if "\t" in l)
 ours, total = [], 0
@@ -185,6 +186,11 @@ for line in open(sys.argv[2], encoding="utf-8", errors="replace"):
     for rel, start in starts.items():
         if path.endswith("src/" + rel) and int(m.group(2)) >= int(start):
             ours.append(f"{rel}: our line {int(m.group(2)) - int(start) + 1}: {line.split(': error ', 1)[1].strip()}")
+if total == 0 and sys.argv[3] != "0":
+    # tsc died without reporting a single type error: it did not really run.
+    print("typecheck: tsc could not run — skipped")
+    print("  " + open(sys.argv[2], encoding="utf-8", errors="replace").read(400).strip().replace("\n", "\n  "))
+    sys.exit(0)
 print(f"typecheck: {len(ours)} error(s) in powerline code ({total} total incl. upstream)")
 for o in ours:
     print("  " + o)
