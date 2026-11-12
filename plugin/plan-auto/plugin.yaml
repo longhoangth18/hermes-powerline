@@ -1,0 +1,6 @@
+name: plan-auto
+version: 1.0.0
+description: "Turns plan-mode ON by default at the start of every interactive user turn (TUI/CLI). Agent-owned activation: the agent may leave it with plan_mode off for work that changes nothing (questions, inspection, security ops). Skips subagents, cron, one-shot runs, slash commands, injected messages and 'làm luôn'. Requires the plan-mode plugin."
+author: "Long Hoang Trinh"
+provides_hooks:
+  - pre_llm_call

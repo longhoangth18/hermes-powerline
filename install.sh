@@ -61,6 +61,18 @@ if command -v hermes >/dev/null 2>&1; then
     echo "note: enable it with: hermes plugins enable powerline-net"
 fi
 
+# plan-auto: opt-in companion of the plan-mode plugin — plan mode ON by default for every
+# interactive turn. Linked here but never enabled by the installer: it changes how the agent works.
+AUTO="$HH/plugins/plan-auto"
+if [ -e "$AUTO" ] && [ ! -L "$AUTO" ]; then mv "$AUTO" "$PL/plan-auto.plugin.bak.$(date +%Y%m%d%H%M%S)"; fi
+rm -f "$AUTO"
+if [ "$MODE" = "link" ]; then
+  ln -s "$HERE/plugin/plan-auto" "$AUTO"
+else
+  mkdir -p "$AUTO" && cp "$HERE/plugin/plan-auto/__init__.py" "$HERE/plugin/plan-auto/plugin.yaml" "$AUTO/"
+fi
+echo "plan-auto linked (opt-in, needs the plan-mode plugin): hermes plugins enable plan-auto"
+
 # hy widgets (sidebar + session tabs) and the hy-jade skin go into Hermes' own
 # user slots — $HERMES_HOME/tui-widgets and $HERMES_HOME/skins — for the default
 # profile and every named profile, so `hy -p <profile>` looks the same.

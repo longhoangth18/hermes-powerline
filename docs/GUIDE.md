@@ -19,6 +19,7 @@ Everything about the "hy" interface for Hermes Agent: what it is made of, how to
 | TUI theme | `skins/hy-dracula.yaml` (default), `skins/hy-jade.yaml` (alternative) | Dracula spec canvas `#282A36` with a **jade-green accent** (`#50FA7B`) instead of Dracula's purple; muted text `#9AA5CE` (5.9:1); green → cyan logo. |
 | Web dashboard theme | `dashboard-themes/hy-dracula.yaml` (+ `hy-jade.yaml`) | Same palette for `hermes dashboard` and its web chat; JetBrainsMono Nerd Font as the mono font so the web chat draws the icons. |
 | Metrics plugin | `plugin/powerline-net/` | Hermes plugin that records the real per-call tokens/s, time to first token and API errors (4xx/5xx/timeouts). |
+| Plan by default (opt-in) | `plugin/plan-auto/` | Companion of the `plan-mode` plugin: turns plan mode on at the start of every interactive turn. See [plan-auto](#plan-auto-plan-mode-by-default). |
 | zsh hook | `shell/hermes-powerline.zsh` | Makes `hermes`, `hermes --yolo`, `hermes -p <profile>`, `hermes chat`, `hermes dashboard` and `hy` share **one** build. |
 | Launcher / builder | `bin/hermes-powerline` | Builds the injected TUI, rebuilds when Hermes changes, falls back to the stock TUI when it no longer fits. |
 
@@ -41,7 +42,7 @@ hermes                         # or: hy   (= hermes --yolo)
 What `install.sh` does (everything is a symlink, so updating is `git pull`):
 
 1. Links `src/*` → `~/.hermes/powerline/` and `bin/hermes-powerline` → `~/.local/bin/`.
-2. Links the `powerline-net` plugin into `~/.hermes/plugins/` and enables it.
+2. Links the `powerline-net` plugin into `~/.hermes/plugins/` and enables it. Links `plan-auto` too, but leaves it disabled (opt-in).
 3. Links `widgets/*.mjs` into `~/.hermes/tui-widgets/` **and** every `~/.hermes/profiles/*/tui-widgets/`.
 4. Links the skins into `~/.hermes/skins/` (and every profile) and the dashboard themes into `~/.hermes/dashboard-themes/`.
 5. Sets `display.skin: hy-dracula` (default + every profile) and `dashboard.theme: hy-dracula` — skip with `--keep-skin`.
@@ -131,6 +132,17 @@ Inside Hermes: `/hy-sidebar` toggles the sidebar, `/hy-tabs` the tabs, `^X` open
 | Graphite + jade look instead of Dracula | `hermes config set display.skin hy-jade` and `hermes config set dashboard.theme hy-jade` |
 | Force 24-bit colour | `HERMES_TUI_TRUECOLOR=1` (Hermes' own switch; `HY` follows it) |
 
+### plan-auto: plan mode by default
+
+The [`plan-mode`](https://github.com/100yenadmin/hermes-plan-mode) plugin only turns on with `/plan`, `/planmode on` or when the agent calls `plan_mode(on)` itself — and in practice models skip that even when the system prompt tells them to. `plan-auto` makes that call for the agent at the start of every interactive user turn, through plan-mode's own command path, so all of plan-mode's guards and approval cards stay in charge.
+
+- **Enable:** `hermes plugins enable plan-auto` (needs `plan-mode` enabled; hot-loads, no restart). **Disable:** `hermes plugins disable plan-auto`, or `HERMES_PLAN_AUTO=0` for one launch.
+- **Agent-owned activation.** A request that changes nothing — a question, research, running or inspecting things, security work — lets the agent call `plan_mode` action `off` and carry on. Anything that writes files gets a plan and an approval card first.
+- **Skipped turns:** plan mode already on or executing an approved plan; subagents, curator, cron and `hermes -z`; non-terminal surfaces (messaging platforms); slash commands; messages Hermes injects (`[ASYNC DELEGATION …]`, plan-mode's own "Implement the approved plan at …"); and opt-outs in the message: `làm luôn`, `không cần plan`, `skip plan`, `no plan`.
+- **Trace:** one line per decision in `~/.cache/plan-auto/trace.log` (rotates at 512 KB; `HERMES_PLAN_AUTO_TRACE=0` turns it off) — `on: …` or `skip: <reason>`.
+- **Editing it:** the gateway keeps plugin code loaded; after a change run `hermes plugins disable plan-auto && hermes plugins enable plan-auto` to load the new code.
+- **System prompt.** Say the same thing in your `SOUL.md` so the model knows what the `[plan-auto]` note means, e.g. *"Plan mode is ON by default (plan-auto). Any request that edits files stays in plan mode and is submitted for approval; for a question, research, running things or security work call `plan_mode` action `off` first."*
+
 ---
 
 ## 6. Where to change things
@@ -193,6 +205,7 @@ Data notes the widgets rely on:
 ~/.local/bin/hermes-powerline             → repo/bin/hermes-powerline
 ~/.hermes/powerline/                      ← linked sources + config.json + build (tui/) + .stage/
 ~/.hermes/plugins/powerline-net           → repo/plugin/powerline-net
+~/.hermes/plugins/plan-auto               → repo/plugin/plan-auto   (opt-in; trace in ~/.cache/plan-auto/)
 ~/.hermes/tui-widgets/hy-*.mjs            → repo/widgets/   (and ~/.hermes/profiles/*/tui-widgets/)
 ~/.hermes/skins/hy-*.yaml                 → repo/skins/     (and every profile)
 ~/.hermes/dashboard-themes/hy-*.yaml      → repo/dashboard-themes/

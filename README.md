@@ -57,6 +57,7 @@ Options: `--shell` adds the zsh hook so plain `hermes` uses the same build (reco
 | `src/*.tsx`, `src/*.ts` | `~/.hermes/powerline/` | the build (injected into a staged copy of the Hermes TUI) |
 | `bin/hermes-powerline` | `~/.local/bin/` | launcher / builder |
 | `plugin/powerline-net` | `~/.hermes/plugins/` | real per-call t/s, TTFT, API errors |
+| `plugin/plan-auto` | `~/.hermes/plugins/` (linked, **not** enabled) | opt-in: plan mode on by default for every turn ([details](docs/GUIDE.md#plan-auto-plan-mode-by-default)) |
 | `widgets/hy-*.mjs` | `~/.hermes/tui-widgets/` and every `~/.hermes/profiles/*/tui-widgets/` | sidebar + tabs (Hermes' official user-widget slot) |
 | `skins/hy-jade.yaml` | `~/.hermes/skins/` (+ profiles) | TUI / CLI skin |
 | `dashboard-themes/hy-jade.yaml` | `~/.hermes/dashboard-themes/` | web dashboard + web chat |

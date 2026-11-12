@@ -15,6 +15,10 @@ rm -f "$BIN/hermes-powerline"
 if command -v hermes >/dev/null 2>&1; then hermes plugins disable powerline-net >/dev/null 2>&1 || true; fi
 NET="$HH/plugins/powerline-net"
 if [ -L "$NET" ]; then rm -f "$NET"; elif [ -d "$NET" ]; then rm -rf "$NET"; fi
+if command -v hermes >/dev/null 2>&1; then hermes plugins disable plan-auto >/dev/null 2>&1 || true; fi
+AUTO="$HH/plugins/plan-auto"
+if [ -L "$AUTO" ]; then rm -f "$AUTO"; elif [ -d "$AUTO" ]; then rm -rf "$AUTO"; fi
+rm -f "$HOME/.cache/plan-auto/trace.log" "$HOME/.cache/plan-auto/trace.log.1"; rmdir "$HOME/.cache/plan-auto" 2>/dev/null || true
 NETDIR="${HERMES_POWERLINE_NET_DIR:-$HOME/.cache/hermes-powerline/net}"
 # Only ever the plugin's own JSON files, wherever that directory was pointed.
 if [ -d "$NETDIR" ]; then find "$NETDIR" -maxdepth 1 \( -name '*.json' -o -name '.tmp-*' \) -type f -delete; rmdir "$NETDIR" 2>/dev/null || true; fi
