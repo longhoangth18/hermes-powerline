@@ -35,7 +35,7 @@ const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '�
 const FALLBACK = {
   bg: '#282A36', comment: '#6272A4', cyan: '#8BE9FD', deep: '#21222C', deeper: '#191A21', dim: '#9AA5CE',
   fg: '#F8F8F2', green: '#50FA7B', line: '#44475A', orange: '#FFB86C', pink: '#FF79C6', purple: '#BD93F9',
-  raised: '#4D5066', red: '#FF5555', surface: '#343746', truecolor: true, yellow: '#F1FA8C', accent: '#50FA7B'
+  raised: '#4D5066', red: '#FF5555', surface: '#343746', truecolor: true, yellow: '#F1FA8C', accent: '#50FA7B', idle: '#8A95C0'
 }
 
 const IC = {
@@ -760,7 +760,7 @@ export default function register(sdk) {
             ? { bg: c.line, bold: true, fg: c.green, text: `✓ ${r}` }
             : st === 'failed'
               ? { bg: c.line, bold: true, fg: c.red, text: `× ${r}` }
-              : { bg: c.surface, fg: c.comment, text: `· ${r}` }
+              : { bg: c.surface, fg: c.idle, text: `· ${r}` }
       const body = chipRows([...states].map(([r, st]) => chip(r, st)), 'rc')
       const live = subs.slice(-5)
 
@@ -967,7 +967,7 @@ export default function register(sdk) {
             : { bg: c.line, bold: true, fg: c.green, text: label }
       }
 
-      return usedKeys.has(k) ? { bg: c.line, bold: true, fg: c.green, text: `✓ ${label}` } : { bg: c.surface, fg: c.comment, text: label }
+      return usedKeys.has(k) ? { bg: c.line, bold: true, fg: c.green, text: `✓ ${label}` } : { bg: c.surface, fg: c.idle, text: label }
     })
     const wall = room > 0 ? chipRows(tiles, 'w', room) : []
     const wallShown = wall.reduce((n, el) => n + (el.props?.items?.length ?? 0), 0)

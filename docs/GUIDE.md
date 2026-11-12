@@ -209,3 +209,21 @@ Data notes the widgets rely on:
 - Dracula: draculatheme.com/spec (palette, syntax); markdown colours from the Dracula VS Code theme; 256-colour codes from `dracula/vim`; diff tints from OpenCode's Dracula theme.
 - Contrast (WCAG 2.1): `#6272A4` on `#282A36` is only 3:1 → rules, hints and code comments only; muted labels use `#9AA5CE` (5.9:1). State is always a glyph or word as well as a colour.
 - Status bar vs sidebar: details live in the sidebar; the bar keeps only what the sidebar does not show.
+
+### Design acceptance — contrast audit (WCAG 2.1)
+
+Every colour pair the UI draws, measured on the truecolor palette (256-colour fallbacks checked for the idle pair too). Text needs ≥ 4.5:1; hints, rules and de-emphasised idle states ≥ 3:1.
+
+| Pair | Ratio | |
+| --- | --- | --- |
+| body text `#F8F8F2` on canvas `#282A36` | 13.36 | ✓ |
+| muted labels `#9AA5CE` on canvas | 5.86 | ✓ |
+| green headers `#50FA7B` / cyan / orange / pink / red on canvas | 10.38 / 10.29 / 8.36 / 5.97 / 4.53 | ✓ |
+| hints `#6272A4` on canvas | 3.03 | ✓ (hints only) |
+| idle chips & tiles `#8A95C0` on surface `#343746` (256: `#8787AF` on `#3A3A3A`) | 4.01 (3.31) | ✓ — was 2.51 with `#6272A4`, fixed |
+| used chips / inline code: green on `#44475A` | 6.67 | ✓ |
+| current tab: `#191A21` on green; active chips on orange / yellow | 12.63 / 10.18 / 15.52 | ✓ |
+| code text / comments / line numbers on panel `#21222C` | 14.81 / 3.36 / 3.36 | ✓ |
+| diff rows: text on `#1A3A1A` / `#3A1A1A` | 11.84 / 14.67 | ✓ |
+
+State is never colour alone: every status also has a glyph or word (✓ × · ⠋ ▶ ○, `online` / `calling` / `off` / `error`).

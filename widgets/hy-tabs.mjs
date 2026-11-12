@@ -25,7 +25,7 @@ const TAB_MAX = 22
 const FALLBACK = {
   comment: '#6272A4', cyan: '#8BE9FD', deep: '#21222C', deeper: '#191A21', dim: '#9AA5CE', fg: '#F8F8F2',
   green: '#50FA7B', line: '#44475A', orange: '#FFB86C', pink: '#FF79C6', purple: '#BD93F9', red: '#FF5555',
-  surface: '#343746', yellow: '#F1FA8C', accent: '#50FA7B'
+  surface: '#343746', yellow: '#F1FA8C', accent: '#50FA7B', idle: '#8A95C0'
 }
 
 const roster = () => (Array.isArray(globalThis.__hySessions) ? globalThis.__hySessions : null)
@@ -137,7 +137,7 @@ export default function register(sdk) {
             ? { bg: c.surface, bold: true, fg: c.green, g: '✓' }
             : st === 'failed'
               ? { bg: c.surface, bold: true, fg: c.red, g: '×' }
-              : { bg: c.deep, fg: c.comment, g: '·' }
+              : { bg: c.deep, fg: c.idle, g: '·' }
       const text = ` ${sty.g} ${r} `
 
       routeW += text.length + 1

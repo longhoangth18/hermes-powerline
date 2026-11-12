@@ -166,6 +166,8 @@ export const HY = {
   purple: T24 ? '#BD93F9' : '#AF87FF', //                      | 141
   red: T24 ? '#FF5555' : '#FF5F5F', //                         | 203
   yellow: T24 ? '#F1FA8C' : '#FFFF87', //                      | 228
+  /** Idle / unused chips and tiles: dimmer than labels, still ≥ 3:1 on the surface (comment is 2.5:1). */
+  idle: T24 ? '#8A95C0' : '#8787AF',
   /** The hy accent: Dracula green (the user's colour), not Dracula's usual purple. */
   accent: T24 ? '#50FA7B' : '#5FFF87'
 }
