@@ -323,8 +323,7 @@ function routeStates() {
 globalThis.__hyRouteStates = routeStates
 globalThis.__hyRouteOf = routeOf
 
-// Section folding: key → collapsed? (a header click sets it; otherwise each
-// section decides — MCP folds itself while nothing is calling and nothing is broken).
+// Section folding: key → collapsed? Only a header click folds a section; nothing folds by itself.
 const collapsed = new Map()
 
 // Hermes archives the todo list into the transcript when a turn ends; keep the
@@ -937,9 +936,8 @@ export default function register(sdk) {
 
     // Compact: at most 2 rows of tiles. Loading skills first (pulsing), then the
     // ones used this session (most recent first, lit), then the rest dimmed.
-    // MCP folds itself while nothing is calling and every server is fine.
-    const mcpAuto = mcpLive.size === 0 && servers.every(m => m.connected || ['connected', 'lazy', 'configured', 'disabled'].includes(m.status))
-    const mcpOpen = isOpen('mcp', mcpAuto)
+    // Nothing folds by itself — sections stay open until the user clicks a header.
+    const mcpOpen = isOpen('mcp')
     const filesN = Math.min(6, data?.files?.size ?? 0)
     const reserve = (mcpRows.length ? (mcpOpen ? mcpRows.length + 2 : 2) : 0) + (filesN ? filesN + 2 : 0) + 3 // + footer
     const room = Math.max(0, Math.min(2, rows - used - 3 - reserve))
@@ -1001,8 +999,7 @@ export default function register(sdk) {
         rightColor: mcpLive.size ? c.orange : upN === servers.length ? c.green : c.yellow,
         title: 'MCP'
       }),
-      mcpRows,
-      mcpAuto
+      mcpRows
     )
 
     // ── FILES ──
