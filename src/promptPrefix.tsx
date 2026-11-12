@@ -388,7 +388,7 @@ function plsStats(s: null | PlSys, keys: PlStatKey[]): PlStat[] {
 const PLP_LOOK: Record<PlPromptKind, { bg: string; fg: string }> = PL_LOOK.mono
   ? {
       agent: { bg: plEdgeGray(2, 3), fg: plInk(plEdgeGray(2, 3)) },
-      caret: { bg: plGray(0), fg: PL_LOOK.edge ?? '#5FD75F' },
+      caret: { bg: plGray(0), fg: PL_LOOK.edge ?? '#50FA7B' },
       host: { bg: plEdgeGray(1, 3), fg: plInk(plEdgeGray(1, 3)) },
       user: { bg: plEdgeGray(0, 3), fg: plInk(plEdgeGray(0, 3)) }
     }

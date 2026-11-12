@@ -1,26 +1,51 @@
-// hy-tabs — OpenCode-style session tabs for the Hermes TUI (part of hermes-powerline).
+// hy-tabs — session tabs + subagent route strip for the hy TUI (part of hermes-powerline).
 //
-// Every live Hermes session (the roster the ^X switcher shows) is a tab in the
-// bottom dock: the current one is a jade pill, the others show their state —
-// a spinner + sweeping glow while working, ? when waiting for you, ✓ idle.
-// Click a tab to switch to it; ^X opens the full switcher; /new starts one.
-// Hidden while there is only one session, so a single-chat day stays clean.
+// Bottom dock row:
+//   ◫ ( ⠼ 1 refactor rate limiter × ) ( ✓ 2 pentest notes × ) [+]        ⑂ ·coder ⠼reviewer ✓researcher
 //
-// Data: globalThis.__hySessions (published by the hermes-powerline build from
-// app/liveSessions.ts, refreshed by Hermes every ~1.5 s) and
-// globalThis.__hyActivateSession (from app/useMainApp.ts).
-// Safety: no bridge (plain `hermes` / stock TUI) → never opens, renders nothing.
-// Re-renders only when the roster changes, or every 120 ms while a session works.
+//   • every live Hermes session (the ^X switcher roster) is a pill; the current
+//     one is Dracula purple, working ones spin and glow, ? = waiting for you;
+//   • click a pill to switch, its × to close it, [+] for a new session
+//     (closing works for sessions this window owns — Hermes refuses others and
+//     says so in the transcript);
+//   • right side: one chip per subagent route (~/.hermes/profiles/*): pulsing
+//     while a delegated task runs on it, ✓ once it has run this session,
+//     dim when unused — data shared with hy-sidebar (globalThis.__hyData).
+//
+// Data: globalThis.__hySessions / __hyActivateSession / __hyCloseSession /
+// __hyNewSession (published by the hermes-powerline build), __hyRouteStates (sidebar).
+// Safety: no bridge (plain `hermes`, stock TUI) → never opens, renders nothing.
+// Repaints only on a roster/route change, or every 120 ms while something works.
 // HY_TABS=0 keeps it closed at startup; /hy-tabs toggles.
 
 const ID = 'hy-tabs'
 const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
-const TAB_MAX = 24
-const JADE = '#5FD75F'
-const AMBER = '#FFAF5F'
+const TAB_MAX = 22
+
+const FALLBACK = {
+  comment: '#6272A4', cyan: '#8BE9FD', deep: '#21222C', deeper: '#191A21', dim: '#9AA5CE', fg: '#F8F8F2',
+  green: '#50FA7B', line: '#44475A', orange: '#FFB86C', pink: '#FF79C6', purple: '#BD93F9', red: '#FF5555',
+  surface: '#343746', yellow: '#F1FA8C'
+}
 
 const roster = () => (Array.isArray(globalThis.__hySessions) ? globalThis.__hySessions : null)
-const hasBridge = () => !!globalThis.__hy?.ui?.get && roster() !== null
+const hasBridge = () => Boolean(globalThis.__hy?.ui?.get) && roster() !== null
+const theme = () => ({ ...FALLBACK, ...(globalThis.__hy?.theme ?? {}) })
+const busy = s => s?.status === 'working' || s?.status === 'starting'
+
+const call = (fn, ...args) => {
+  try {
+    const f = globalThis[fn]
+
+    if (typeof f === 'function') {
+      const r = f(...args)
+
+      r?.catch?.(() => {}) // Hermes reports refusals in the transcript itself
+    }
+  } catch {
+    // best-effort UI action
+  }
+}
 
 export default function register(sdk) {
   const { Box, Text, React, defineWidgetApp, openWidget } = sdk
@@ -38,19 +63,25 @@ export default function register(sdk) {
     return raw.length > TAB_MAX ? raw.slice(0, TAB_MAX - 1) + '…' : raw
   }
 
-  const busy = s => s?.status === 'working' || s?.status === 'starting'
+  const routeSig = () => {
+    try {
+      return [...(globalThis.__hyRouteStates?.() ?? new Map())].map(([r, s]) => `${r}:${s}`).join(',')
+    } catch {
+      return ''
+    }
+  }
 
-  function Tabs({ t }) {
+  function Tabs() {
     const [, force] = useState(0)
 
     useEffect(() => {
       let sig = ''
       const id = setInterval(() => {
         const list = roster() ?? []
-        const next = list.map(s => `${s.id}:${s.status}:${s.title ?? ''}:${s.current ? 1 : 0}`).join('|') + `#${globalThis.__hy?.ui?.get()?.sid}`
+        const routes = routeSig()
+        const next = list.map(s => `${s.id}:${s.status}:${s.title ?? ''}:${s.current ? 1 : 0}`).join('|') + `#${globalThis.__hy?.ui?.get()?.sid}#${routes}`
 
-        // Repaint on a roster change, or continuously while a session works (spinner/glow).
-        if (next !== sig || list.some(busy)) {
+        if (next !== sig || list.some(busy) || routes.includes(':active')) {
           sig = next
           force(n => n + 1)
         }
@@ -61,22 +92,53 @@ export default function register(sdk) {
 
     const list = roster()
 
-    if (!list || list.length < 2) {
+    if (!list) {
       return null
     }
 
+    const c = theme()
     const cur = globalThis.__hy?.ui?.get()?.sid
     const now = Date.now()
     const spin = SPIN[Math.floor(now / 90) % SPIN.length]
     const cols = process.stdout.columns || 100
-    const budget = cols - 24
+
+    // Route chips (right side).
+    let states = new Map()
+
+    try {
+      states = globalThis.__hyRouteStates?.() ?? new Map()
+    } catch {
+      // sidebar not loaded → no route strip
+    }
+
+    const routeNodes = []
+    let routeW = 0
+
+    for (const [r, st] of states) {
+      const pulse = Math.floor(now / 300) % 2
+      const sty =
+        st === 'active'
+          ? { bg: pulse ? c.orange : c.yellow, bold: true, fg: c.deeper, g: spin }
+          : st === 'done'
+            ? { bg: c.surface, bold: true, fg: c.green, g: '✓' }
+            : st === 'failed'
+              ? { bg: c.surface, bold: true, fg: c.red, g: '×' }
+              : { bg: c.deep, fg: c.comment, g: '·' }
+      const text = ` ${sty.g} ${r} `
+
+      routeW += text.length + 1
+      routeNodes.push(h(Text, { backgroundColor: sty.bg, bold: sty.bold, color: sty.fg, key: `r${r}` }, text), h(Text, { key: `rs${r}` }, ' '))
+    }
+
+    const showRoutes = routeNodes.length > 0 && cols >= 90
+    const budget = cols - 8 - (showRoutes ? routeW + 4 : 16)
     const tabs = []
-    let used = 2
+    let used = 0
 
     list.forEach((s, i) => {
       const isCur = Boolean(s.current) || s.id === cur
-      const text = ` ${i + 1} ${label(s, i)} `
-      const w = text.length + 4
+      const name = ` ${i + 1} ${label(s, i)} `
+      const w = name.length + 6
 
       if (used + w > budget) {
         return
@@ -84,46 +146,38 @@ export default function register(sdk) {
 
       used += w
 
-      const bg = isCur ? JADE : '#303030'
-      const fg = isCur ? '#1C1C1C' : '#C6C6C6'
-      const glyph = busy(s) ? spin : s.status === 'waiting' ? '?' : '✓'
-      const gColor = isCur ? '#1C1C1C' : busy(s) ? AMBER : s.status === 'waiting' ? '#FFFF87' : JADE
-      // Working, not focused: a soft glow sweeps across the tab title.
-      const sweep = busy(s) && !isCur ? Math.floor(now / 70) % (text.length + 8) : -99
+      const bg = isCur ? c.purple : c.surface
+      const fg = isCur ? c.deeper : c.fg
+      const glyph = busy(s) ? spin : s.status === 'waiting' ? '?' : '●'
+      const gColor = busy(s) ? (isCur ? c.deeper : c.orange) : s.status === 'waiting' ? (isCur ? c.deeper : c.yellow) : isCur ? c.deeper : c.green
+      const sweep = busy(s) && !isCur ? Math.floor(now / 70) % (name.length + 8) : -99
 
       tabs.push(
         h(
           Box,
-          {
-            flexShrink: 0,
-            key: s.id,
-            onClick: () => {
-              try {
-                if (!isCur && typeof globalThis.__hyActivateSession === 'function') {
-                  globalThis.__hyActivateSession(s.id)
-                }
-              } catch {
-                // switching is best-effort
-              }
-            }
-          },
+          { flexDirection: 'row', flexShrink: 0, key: s.id },
+          h(Text, { color: bg }, '\u{e0b6}'),
           h(
-            Text,
-            null,
-            h(Text, { color: bg }, '\u{e0b6}'),
-            h(Text, { backgroundColor: bg, bold: true, color: gColor }, glyph),
+            Box,
+            { flexShrink: 0, onClick: () => !isCur && call('__hyActivateSession', s.id) },
             h(
               Text,
               { backgroundColor: bg, bold: isCur },
-              ...[...text].map((ch, k) => {
+              h(Text, { color: gColor }, glyph),
+              ...[...name].map((ch, k) => {
                 const d = Math.abs(k - sweep + 4)
 
-                return h(Text, { color: d <= 2 ? '#FFFFFF' : d <= 4 ? '#E4E4E4' : fg, key: k }, ch)
+                return h(Text, { color: d <= 2 ? '#FFFFFF' : d <= 4 ? c.yellow : fg, key: k }, ch)
               })
-            ),
-            h(Text, { color: bg }, '\u{e0b4}'),
-            h(Text, null, ' ')
-          )
+            )
+          ),
+          h(
+            Box,
+            { flexShrink: 0, onClick: () => call('__hyCloseSession', s.id) },
+            h(Text, { backgroundColor: bg, color: isCur ? c.deeper : c.comment }, '× ')
+          ),
+          h(Text, { color: bg }, '\u{e0b4}'),
+          h(Text, null, ' ')
         )
       )
     })
@@ -133,11 +187,17 @@ export default function register(sdk) {
     return h(
       Box,
       { flexDirection: 'row', flexShrink: 0, width: Math.max(20, cols - 4) },
-      h(Text, { color: '#6C6C6C' }, '\u{f04e9} '),
+      h(Text, { color: c.purple }, '\u{f04e9} '),
       ...tabs,
-      hidden > 0 ? h(Text, { color: t.color.muted }, `+${hidden} `) : null,
+      hidden > 0 ? h(Text, { color: c.dim }, `+${hidden} `) : null,
+      h(
+        Box,
+        { flexShrink: 0, onClick: () => call('__hyNewSession') },
+        h(Text, null, h(Text, { color: c.line }, '\u{e0b6}'), h(Text, { backgroundColor: c.line, bold: true, color: c.green }, '+'), h(Text, { color: c.line }, '\u{e0b4}'))
+      ),
       h(Box, { flexGrow: 1 }),
-      h(Text, { color: '#585858' }, '^X switch · /new')
+      showRoutes ? h(Text, { color: c.purple }, '\u{f000e} ') : h(Text, { color: c.comment }, '^X switch'),
+      ...(showRoutes ? routeNodes : [])
     )
   }
 
@@ -145,12 +205,12 @@ export default function register(sdk) {
 
   try {
     app = defineWidgetApp({
-      help: 'hy tabs — live sessions as clickable tabs (^X switcher, /new)',
+      help: 'hy tabs — live sessions as clickable tabs (× close, + new) and subagent route status',
       id: ID,
       init: () => ({ v: 1 }),
       mode: 'ambient',
       reduce: (state, input) => (input?.key?.escape ? null : state),
-      render: ({ t }) => (hasBridge() ? h(Tabs, { t }) : null),
+      render: () => (hasBridge() ? h(Tabs) : null),
       width: 10,
       zone: 'dock-bottom'
     })
@@ -170,7 +230,7 @@ export default function register(sdk) {
           // ignore
         }
       } else if (++tries < 40) {
-        setTimeout(boot, 250) // roster arrives with the first live-session poll
+        setTimeout(boot, 250)
       }
     }
 

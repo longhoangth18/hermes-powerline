@@ -16,6 +16,8 @@
 // back to the stock renderer for that block — never a broken transcript.
 // ═══════════════════════════════════════════════════════════════════════
 
+import { HY as __cvHY } from '../lib/prompt.js'
+
 const PL_CV_ON = process.env.HERMES_CODEVIEW !== '0'
 const PL_CV_MAX_W = 120
 
@@ -54,41 +56,41 @@ interface PlCvPal {
   vari: string
 }
 
-// Exact xterm-256 colours only: Hermes drops to 256-colour output under tmux /
-// Termius, and a tinted dark grey (#1D2026) rounds to cube 59 (#5f5f5f) there.
-// Neutral greys hit the grayscale ramp exactly; accents are cube colours, so the
-// panel looks the same in truecolor and 256-colour terminals.
+// Dracula (draculatheme.com/spec) for every token; canvas tones come from the
+// shared HY theme in lib/prompt.ts, which falls back to exact xterm greys when
+// Hermes runs at 256 colours (tmux / Apple Terminal), where a tinted dark would
+// round to a washed-out cube grey. Accent hexes round to close neighbours.
 const PL_CV_DARK: PlCvPal = {
-  accent: '#5FD75F', //  77 — the powerline separator green
-  addBg: '#0B3B14', // → 22 under chalk's 256 rounding (#005f00)
-  addFg: '#87FF87', //  120
-  addGut: '#0B3B14',
-  attr: '#87D7FF', //   117
-  bg: '#262626', //     235
-  border: '#585858', // 240
-  cnst: '#AF87FF', //   141
-  com: '#808080', //    244
-  deco: '#FFFF87', //   228
-  delBg: '#420C12', // → 52 under chalk's 256 rounding (#5f0000)
-  delFg: '#FF8787', //  210
-  delGut: '#420C12',
-  fn: '#87AFFF', //     111
-  gutter: '#6C6C6C', // 242
-  head: '#3A3A3A', //   237
-  headFg: '#D0D0D0', // 252
-  hunk: '#9E9E9E', //   247
-  hunkBg: '#303030', // 236
-  kw: '#FF87D7', //     212
-  muted: '#8A8A8A', //  245
-  num: '#FFAF5F', //    215
-  op: '#FF87AF', //     211
-  prop: '#5FD7D7', //    80
-  punc: '#A8A8A8', //   248
-  str: '#AFD787', //    150
-  tag: '#FF87D7', //    212
-  text: '#E4E4E4', //   254
-  type: '#87D7FF', //   117
-  vari: '#FFD787' //    222
+  accent: __cvHY.purple, // language chip
+  addBg: __cvHY.truecolor ? '#1A3A1A' : '#0B3B14', // OpenCode Dracula · 256: → 22
+  addFg: __cvHY.green,
+  addGut: __cvHY.truecolor ? '#224A22' : '#0B3B14',
+  attr: __cvHY.green, // HTML attributes
+  bg: __cvHY.deep, // editor panel (#21222C)
+  border: __cvHY.line,
+  cnst: __cvHY.purple, // true/false/null/self, ALL_CAPS
+  com: __cvHY.comment,
+  deco: __cvHY.green, // @decorators
+  delBg: __cvHY.truecolor ? '#3A1A1A' : '#420C12', // OpenCode Dracula · 256: → 52
+  delFg: __cvHY.red,
+  delGut: __cvHY.truecolor ? '#4A2222' : '#420C12',
+  fn: __cvHY.green, // functions / commands
+  gutter: __cvHY.truecolor ? '#6272A4' : '#6C6C6C',
+  head: __cvHY.line, // header band (#44475A)
+  headFg: __cvHY.fg,
+  hunk: __cvHY.comment,
+  hunkBg: __cvHY.surface,
+  kw: __cvHY.pink,
+  muted: __cvHY.dim,
+  num: __cvHY.orange, // spec: numbers/booleans orange
+  op: __cvHY.pink,
+  prop: __cvHY.fg,
+  punc: __cvHY.truecolor ? '#C0C4D6' : '#BCBCBC',
+  str: __cvHY.yellow,
+  tag: __cvHY.pink,
+  text: __cvHY.fg,
+  type: __cvHY.cyan, // classes / types (italic)
+  vari: __cvHY.orange // shell $vars / flags
 }
 
 const PL_CV_LIGHT: PlCvPal = {
@@ -375,6 +377,18 @@ function plCvClassifyId(
     return 'kw'
   }
 
+  // Name being defined: `def foo`, `function foo`, `fn foo`, `func foo` → function;
+  // `class Foo`, `struct Foo`, `interface Foo`, `type Foo` → type.
+  const before = line.slice(0, start).match(/(\w+)\s+$/)?.[1]
+
+  if (before && /^(def|function|fn|func|fun|sub|proc|method)$/.test(before)) {
+    return 'fn'
+  }
+
+  if (before && /^(class|struct|interface|type|enum|trait|record|union|impl|object|protocol)$/.test(before)) {
+    return 'type'
+  }
+
   if (lang.lit.has(word)) {
     return 'cnst'
   }
@@ -613,7 +627,7 @@ function plCvLine(line: string, lang: PlCvLang, st: PlCvState): PlCvSeg[] {
       const m = rest.match(/^--?[A-Za-z][\w-]*/)
 
       if (m) {
-        push('num', m[0])
+        push('vari', m[0])
         i += m[0].length
         continue
       }
@@ -881,7 +895,7 @@ function PlCvRow({
           bold={kind === 'kw' || kind === 'tag'}
           color={plCvColor(kind, pal)}
           dimColor={dim}
-          italic={kind === 'com'}
+          italic={kind === 'com' || kind === 'type' || kind === 'deco' || kind === 'cnst'}
           key={i}
         >
           {s}
@@ -911,7 +925,7 @@ function PlCvHeader({
 
   return (
     <Text>
-      <Text backgroundColor={pal.accent} bold color={pal.bg}>
+      <Text backgroundColor={pal.accent} bold color={pal === PL_CV_DARK ? __cvHY.deeper : '#FFFFFF'}>
         {chip}
       </Text>
       <Text backgroundColor={pal.head}>{plCvPad(fill)}</Text>
@@ -1395,5 +1409,318 @@ function renderTable(k: number, rows: string[][], t: Theme, cols?: number): Reac
     )
   } catch {
     return renderTableClassic(k, rows, t, cols)
+  }
+}
+
+// ── markdown (Dracula) ──────────────────────────────────────────────────
+// Headings, rules, bullets, numbers, quotes, inline code, bold and italic are
+// routed here by one-line inserts in markdown.tsx. HERMES_CODEVIEW=0 → stock look.
+
+const plMdDark = (t: Theme) => plCvLum(t.color.text) >= 0.45
+
+const __plMd = (t: Theme) =>
+  plMdDark(t)
+    ? {
+        bold: __cvHY.orange,
+        bullets: [__cvHY.cyan, __cvHY.purple, __cvHY.pink],
+        code: __cvHY.green,
+        codeBg: __cvHY.line,
+        h1: __cvHY.purple,
+        h2: __cvHY.purple,
+        h3: __cvHY.purple,
+        h4: __cvHY.pink,
+        italic: __cvHY.yellow,
+        num: __cvHY.purple,
+        quote: __cvHY.purple,
+        quoteText: __cvHY.yellow,
+        rule: __cvHY.comment,
+        ruleMark: __cvHY.purple,
+        done: __cvHY.green,
+        todo: __cvHY.dim,
+        ink: __cvHY.deeper
+      }
+    : {
+        bold: '#AF5F00',
+        bullets: ['#5F00AF', '#AF005F', '#005F87'],
+        code: '#005F00',
+        codeBg: '#E4E4E4',
+        h1: '#5F00AF',
+        h2: '#5F00AF',
+        h3: '#AF005F',
+        h4: '#005F87',
+        italic: '#875F00',
+        num: '#5F00AF',
+        quote: '#5F00AF',
+        quoteText: '#585858',
+        rule: '#BCBCBC',
+        ruleMark: '#5F00AF',
+        done: '#008700',
+        todo: '#8A8A8A',
+        ink: '#FFFFFF'
+      }
+
+function __plHeading(level: number, text: string, t: Theme, cols: number | undefined, key: number): ReactNode {
+  const md = __plMd(t)
+  const width = plCvWidth(cols)
+
+  if (level === 1) {
+    const plain = stripInlineMarkup(text)
+    const fill = Math.max(2, width - stringWidth(plain) - 4)
+
+    return (
+      <Box flexDirection="column" key={key} marginTop={1}>
+        <Text>
+          <Text backgroundColor={md.h1} bold color={md.ink}>
+            {` ${plain} `}
+          </Text>
+          <Text color={md.h1}>{' ' + '━'.repeat(fill)}</Text>
+        </Text>
+      </Box>
+    )
+  }
+
+  if (level === 2) {
+    return (
+      <Box key={key} marginTop={1}>
+        <Text bold color={md.h2} wrap="wrap-trim">
+          {'▍ '}
+          <MdInline color={md.h2} t={t} text={text} />
+        </Text>
+      </Box>
+    )
+  }
+
+  const color = level === 3 ? md.h3 : md.h4
+
+  return (
+    <Text bold color={color} key={key} wrap="wrap-trim">
+      {level === 3 ? '◆ ' : '› '}
+      <MdInline color={color} t={t} text={text} />
+    </Text>
+  )
+}
+
+function __plRule(t: Theme, cols: number | undefined, key: number): ReactNode {
+  const md = __plMd(t)
+  const w = Math.min(plCvWidth(cols), 72)
+  const side = Math.max(2, Math.floor((w - 3) / 2))
+
+  return (
+    <Text key={key}>
+      <Text color={md.rule}>{'─'.repeat(side)}</Text>
+      <Text color={md.ruleMark}>{' ◆ '}</Text>
+      <Text color={md.rule}>{'─'.repeat(side)}</Text>
+    </Text>
+  )
+}
+
+const __plBulletColor = (t: Theme, indent: string, task: null | RegExpMatchArray): string => {
+  if (!PL_CV_ON) {
+    return t.color.muted
+  }
+
+  const md = __plMd(t)
+
+  if (task) {
+    return task[1]!.toLowerCase() === 'x' ? md.done : md.todo
+  }
+
+  return md.bullets[indentDepth(indent) % md.bullets.length]!
+}
+
+const __plBullet = (marker: string, indent: string, task: null | RegExpMatchArray): string => {
+  if (!PL_CV_ON) {
+    return marker
+  }
+
+  if (task) {
+    return task[1]!.toLowerCase() === 'x' ? '✔' : '○'
+  }
+
+  return ['●', '○', '▪'][indentDepth(indent) % 3]!
+}
+
+const __plNumColor = (t: Theme): string => (PL_CV_ON ? __plMd(t).num : t.color.muted)
+
+const __plQuoteBar = (t: Theme): ReactNode =>
+  PL_CV_ON ? <Text color={__plMd(t).quote}>{'▌ '}</Text> : '│ '
+
+const __plQuoteColor = (t: Theme): string => (PL_CV_ON ? __plMd(t).quoteText : t.color.muted)
+
+function __plInlineCode(code: string, t: Theme, key: number): null | ReactNode {
+  if (!PL_CV_ON) {
+    return null
+  }
+
+  const md = __plMd(t)
+
+  return (
+    <Text backgroundColor={md.codeBg} color={md.code} key={key}>
+      {` ${code} `}
+    </Text>
+  )
+}
+
+const __plBoldColor = (t: Theme): string | undefined => (PL_CV_ON ? __plMd(t).bold : undefined)
+const __plItalicColor = (t: Theme): string | undefined => (PL_CV_ON ? __plMd(t).italic : undefined)
+
+// ── system notice cards ─────────────────────────────────────────────────
+// Hermes injects background results as USER-role messages — e.g. the async
+// delegation batch "[ASYNC DELEGATION BATCH COMPLETE — deleg_x]" with a long
+// instruction paragraph for the model, per-task "--- ✓ TASK i/n: goal (…) ---"
+// headers, raw JSON summaries and an "[INTERNAL NOTIFICATION …]" footer. The
+// transcript shows them as a card instead: coloured edge, title + timing,
+// one line per task, JSON summaries as key: value, other text as markdown.
+// messageLine.tsx calls globalThis.__plNoticeCard (one optional insert).
+
+const PL_NOTICE_HEAD_RE = /^\[([A-Z][A-Z0-9 _/-]{3,})(?:\s+[—-]\s+([^\]]+))?\]\s*$/
+
+function plNoticeSummary(text: string, t: Theme, width: number, key: string): ReactNode {
+  const s = text.trim()
+
+  if (/^[[{]/.test(s)) {
+    try {
+      const v = JSON.parse(s) as unknown
+      const md = __plMd(t)
+
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        return (
+          <Box flexDirection="column" key={key}>
+            {Object.entries(v as Record<string, unknown>).map(([k, val]) => (
+              <Text key={k} wrap="wrap-trim">
+                <Text bold color={md.h2}>
+                  {k}
+                </Text>
+                <Text color={__cvHY.comment}>{': '}</Text>
+                <Text color={typeof val === 'string' ? __cvHY.fg : md.num}>
+                  {typeof val === 'string' ? val : JSON.stringify(val)}
+                </Text>
+              </Text>
+            ))}
+          </Box>
+        )
+      }
+    } catch {
+      // not JSON — fall through to markdown
+    }
+  }
+
+  return <Md cols={width} key={key} t={t} text={s} />
+}
+
+function __plNoticeCardImpl(text: string, t: Theme, cols: number): null | ReactNode {
+  if (!PL_CV_ON || typeof text !== 'string' || !text.startsWith('[')) {
+    return null
+  }
+
+  const lines = text.split('\n')
+  const head = lines[0]!.match(PL_NOTICE_HEAD_RE)
+
+  if (!head || !/INTERNAL NOTIFICATION|DELEGATION|BACKGROUND|PROCESS|CRON|TASK/.test(text)) {
+    return null
+  }
+
+  const md = __plMd(t)
+  const width = Math.max(30, Math.min(PL_CV_MAX_W, cols - 2))
+  const kind = head[1]!.trim()
+  const ident = head[2]?.trim() ?? ''
+  const meta: string[] = []
+  const tasks: { body: string[]; head: string; ok: boolean }[] = []
+  const free: string[] = []
+  let cur: null | { body: string[]; head: string; ok: boolean } = null
+
+  for (const raw of lines.slice(1)) {
+    const line = raw.replace(/\s+$/, '')
+
+    if (/^\[INTERNAL NOTIFICATION/.test(line) || /^chat message because of it\.\]$/.test(line)) {
+      continue
+    }
+
+    const task = line.match(/^---\s*([✓✗⚠])\s*(TASK\s+\d+\/\d+.*?)\s*---$/)
+
+    if (task) {
+      cur = { body: [], head: `${task[1]} ${task[2]}`, ok: task[1] === '✓' }
+      tasks.push(cur)
+      continue
+    }
+
+    const m = line.match(/^(Dispatched|Role|Model|Total duration|Completed|Exit code|Command|Duration):?\s*(.*)$/)
+
+    if (!cur && m) {
+      meta.push(line.replace(/\s{2,}/g, ' · '))
+      continue
+    }
+
+    if (cur) {
+      if (/^Full live transcript/.test(line)) {
+        cur.body.push(`\u0000${line.replace(/^Full live transcript[^:]*:\s*/, '')}`)
+      } else {
+        cur.body.push(line)
+      }
+    } else if (line.trim() && !/^A background fan-out unit|^Any other units|act on these or re-dispatch/.test(line)) {
+      free.push(line)
+    }
+  }
+
+  const ok = tasks.length ? tasks.every(x => x.ok) : !/ERROR|FAILED|✗/.test(text)
+  const edge = ok ? __cvHY.green : __cvHY.red
+  const title = /DELEGATION/.test(kind) ? `⑂ SUBAGENT ${ok ? 'XONG' : 'LỖI'}` : `◈ ${kind}`
+
+  return (
+    <Box flexDirection="column" marginY={0}>
+      <Text>
+        <Text backgroundColor={edge} bold color={__cvHY.deeper}>
+          {` ${title} `}
+        </Text>
+        {ident ? <Text color={__cvHY.comment}>{`  ${ident}`}</Text> : null}
+      </Text>
+      {meta.length ? (
+        <Text color={__cvHY.dim} wrap="wrap-trim">
+          <Text color={edge}>{'▌ '}</Text>
+          {meta.join(' · ')}
+        </Text>
+      ) : null}
+      {tasks.map((task, i) => {
+        const hm = task.head.match(/^(.)\s*TASK\s+(\d+\/\d+):?\s*(.*?)\s*\((.*)\)\s*$/)
+        const goal = hm?.[3] ?? task.head
+        const info = (hm?.[4] ?? '').replace(/status=/, '').replace(/api_calls=(\d+)/, '$1 calls')
+        const body = task.body.filter(l => !l.startsWith('\u0000')).join('\n').trim()
+        const transcript = task.body.find(l => l.startsWith('\u0000'))?.slice(1)
+
+        return (
+          <Box flexDirection="column" key={i}>
+            <Text wrap="wrap-trim">
+              <Text color={task.ok ? __cvHY.green : __cvHY.red}>{`▌ ${task.ok ? '✓' : '✗'} `}</Text>
+              <Text bold color={__cvHY.fg}>
+                {hm ? `${hm[2]} ` : ''}
+              </Text>
+              <Text bold color={md.h2}>
+                {goal}
+              </Text>
+              {info ? <Text color={__cvHY.comment}>{`  ${info}`}</Text> : null}
+            </Text>
+            {body ? (
+              <Box paddingLeft={2}>{plNoticeSummary(body, t, width - 4, `s${i}`)}</Box>
+            ) : null}
+            {transcript ? (
+              <Text color={__cvHY.comment} wrap="truncate-middle">
+                {`  ↳ ${transcript.replace(process.env.HOME ?? '\u0000', '~')}`}
+              </Text>
+            ) : null}
+          </Box>
+        )
+      })}
+      {free.length ? (
+        <Box paddingLeft={2}>{plNoticeSummary(free.join('\n'), t, width - 4, 'free')}</Box>
+      ) : null}
+    </Box>
+  )
+}
+
+;(globalThis as { __plNoticeCard?: unknown }).__plNoticeCard = (text: string, t: Theme, cols: number) => {
+  try {
+    return __plNoticeCardImpl(text, t, cols)
+  } catch {
+    return null
   }
 }

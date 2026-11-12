@@ -2,7 +2,7 @@
 # Install hermes-powerline by symlinking this checkout into place, so a later
 # `git pull` is all an update needs (the next launch rebuilds by itself).
 #
-#   ./install.sh                install (and switch Hermes to the hy-jade skin)
+#   ./install.sh                install (and switch Hermes to the hy-dracula skin + dashboard theme)
 #   ./install.sh --copy         copy files instead of symlinking
 #   ./install.sh --keep-skin    leave display.skin / dashboard.theme alone
 #   ./install.sh --shell        also make plain `hermes` (zsh) use the same build:
@@ -77,14 +77,14 @@ done
 # Web dashboard theme (the dashboard reads themes from the home it was launched with).
 mkdir -p "$HH/dashboard-themes"
 for k in "$HERE"/dashboard-themes/*.yaml; do put "$k" "$HH/dashboard-themes/$(basename "$k")"; done
-echo "installed widgets (hy-sidebar, hy-tabs), skin + dashboard theme hy-jade into ${#homes[@]} Hermes home(s)"
+echo "installed widgets (hy-sidebar, hy-tabs), skins + dashboard themes (hy-dracula, hy-jade) into ${#homes[@]} Hermes home(s)"
 if [ "$SKIN" = 1 ] && command -v hermes >/dev/null 2>&1; then
   for home in "${homes[@]}"; do
-    if [ "$home" = "$HH" ]; then hermes config set display.skin hy-jade >/dev/null 2>&1 || true
-    else hermes -p "$(basename "$home")" config set display.skin hy-jade >/dev/null 2>&1 || true; fi
+    if [ "$home" = "$HH" ]; then hermes config set display.skin hy-dracula >/dev/null 2>&1 || true
+    else hermes -p "$(basename "$home")" config set display.skin hy-dracula >/dev/null 2>&1 || true; fi
   done
-  hermes config set dashboard.theme hy-jade >/dev/null 2>&1 || true
-  echo "display.skin + dashboard.theme → hy-jade (keep yours with ./install.sh --keep-skin)"
+  hermes config set dashboard.theme hy-dracula >/dev/null 2>&1 || true
+  echo "display.skin + dashboard.theme → hy-dracula (keep yours with ./install.sh --keep-skin)"
 fi
 
 if [ "$SHELL_HOOK" = 1 ]; then

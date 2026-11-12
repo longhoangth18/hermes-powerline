@@ -24,18 +24,18 @@ if [ -d "$HH/profiles" ]; then
   for d in "$HH"/profiles/*/; do [ -d "$d" ] && homes+=("${d%/}"); done
 fi
 for home in "${homes[@]}"; do
-  rm -f "$home/tui-widgets/hy-sidebar.mjs" "$home/tui-widgets/hy-tabs.mjs" "$home/skins/hy-jade.yaml"
+  rm -f "$home/tui-widgets/hy-sidebar.mjs" "$home/tui-widgets/hy-tabs.mjs" "$home/skins/hy-jade.yaml" "$home/skins/hy-dracula.yaml"
   rmdir "$home/tui-widgets" 2>/dev/null || true
   if command -v hermes >/dev/null 2>&1; then
     if [ "$home" = "$HH" ]; then p=(); else p=(-p "$(basename "$home")"); fi
-    if [ "$(hermes ${p[@]+"${p[@]}"} config get display.skin 2>/dev/null | tail -1)" = "hy-jade" ]; then
-      hermes ${p[@]+"${p[@]}"} config set display.skin default >/dev/null 2>&1 || true
-    fi
+    case "$(hermes ${p[@]+"${p[@]}"} config get display.skin 2>/dev/null | tail -1)" in hy-*)
+      hermes ${p[@]+"${p[@]}"} config set display.skin default >/dev/null 2>&1 || true ;;
+    esac
   fi
 done
-rm -f "$HH/dashboard-themes/hy-jade.yaml"
-if command -v hermes >/dev/null 2>&1 && [ "$(hermes config get dashboard.theme 2>/dev/null | tail -1)" = "hy-jade" ]; then
-  hermes config set dashboard.theme default >/dev/null 2>&1 || true
+rm -f "$HH/dashboard-themes/hy-jade.yaml" "$HH/dashboard-themes/hy-dracula.yaml"
+if command -v hermes >/dev/null 2>&1; then
+  case "$(hermes config get dashboard.theme 2>/dev/null | tail -1)" in hy-*) hermes config set dashboard.theme default >/dev/null 2>&1 || true ;; esac
 fi
 RC="${ZDOTDIR:-$HOME}/.zshrc"
 if grep -Fq "shell/hermes-powerline.zsh" "$RC" 2>/dev/null; then

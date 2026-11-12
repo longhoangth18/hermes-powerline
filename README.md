@@ -20,14 +20,15 @@ A powerline status bar and prompt, an editor-grade code / diff / table view, an 
 
 | Piece | What you get |
 | --- | --- |
-| **Status bar + prompt** | Two powerline rows. Every bar runs dark at the screen edge → lighter toward the middle (mirrored left/right); a thin jade `›` chevron between cells. Status, model, context meter, real per-call t/s and latency, cache hit, API-error alarm, inbox alarm · folder, branch, clock · user/host/agent · CPU, GPU, RAM, disk, temperature. |
-| **Code view** | Fenced code becomes a filled editor panel: language chip + icon (`lang:path` fences show the file), line numbers, soft-wrap with `↪`, and a real multi-line tokenizer for ~30 languages (block comments and docstrings that span lines, functions, types, constants, decorators, shell commands/flags/`$vars`, JSON/YAML keys, HTML tags/attributes, CSS). |
-| **Diff view** | Unified diffs — ```` ```diff ```` blocks *and* the inline diffs Hermes emits for `patch` / `write_file` — get a per-file header with `+N −M`, old/new line numbers, tinted add/remove rows, and the changed code syntax-highlighted by file type. |
-| **Tables** | Rounded box borders, a header band, numeric columns right-aligned, inline markdown kept in cells. |
-| **hy sidebar** | Right rail (auto on terminals ≥ 112 columns, `/hy-sidebar` toggles): session title + cwd/branch, smooth context gauge, model + effort, calls/tokens/cache; **skills loading (spinner + glow) and loaded** this session (subagents' skills marked `↳`); running tools with timers; subagents; todo progress; files changed; MCP server health. |
-| **hy tabs** | Every live session as a clickable pill above the bar — current one jade, working ones spin and glow. `^X` opens the full switcher, `/new` starts a session. Hidden with a single session. |
-| **hy-jade theme** | One palette for the TUI skin *and* the web dashboard theme (web chat included): graphite greys + jade `#5FD75F`, exact xterm-256 tones so tmux / Termius look the same as truecolor terminals. |
-| **One look everywhere** | Optional zsh hook: `hermes`, `hermes --yolo`, `hermes -p <profile>`, `hermes chat`, `hermes dashboard` (its web chat spawns the same TUI build) and `hy` all run the same build. Admin subcommands and `-z` go straight to the real binary. |
+| **Status bar + prompt** | Two powerline rows; every bar dark at the screen edge → lighter toward the middle (Dracula canvas tones on truecolor, exact xterm greys at 256 colours); thin `›` chevrons. While the hy sidebar is open, cells it already shows (model, context, cache, title/folder/branch, subagents) leave the bar — no duplicated information. |
+| **Code view** | Editor panel per fenced block: language chip + icon (`lang:path` shows the file), line numbers, soft-wrap, multi-line tokenizer for ~30 languages with the Dracula spec mapping (keywords pink, strings yellow, numbers orange, functions green, types cyan italic, constants purple italic, decorators green italic, comments `#6272A4` italic). |
+| **Diff view** | Unified diffs and Hermes' inline `patch`/`write_file` diffs: per-file header with `+N −M`, old/new line numbers, `#1A3A1A`/`#3A1A1A` rows, code highlighted by file type. |
+| **Markdown** | Dracula markdown: H1 band, `▍` H2, `◆` H3, bold orange, italic yellow, inline code as green chips, `▌` yellow quotes, coloured bullets / numbers / task boxes, `─ ◆ ─` rules, bordered tables. |
+| **Result cards** | Background results Hermes injects as messages (`[ASYNC DELEGATION BATCH COMPLETE …]` etc.) become a card: status chip, timing, one line per task (✓/✗, goal, calls, time), JSON summaries as `key: value`, the rest as markdown, transcript path; the instruction paragraph meant for the model is hidden. |
+| **hy sidebar** | Right rail (auto ≥ 112 cols, `/hy-sidebar`): title · model · context gauge · calls/tokens/cache · **TODO** with progress bar and the task flow (subagents working on the current step hang under it) · **SUBAGENTS** — one chip per route (`~/.hermes/profiles/*`) lit while active, ✓ when it ran, plus live and finished tasks with route › goal and timers · RUNNING tools · compact **SKILLS** (2 rows: loading ones pulse, used ones lit and first, `+N`) · **MCP** servers with health, *đang gọi* while in use, calls this session and when · **FILES** written/patched (subagent-tagged) · cwd/branch pinned at the bottom. |
+| **hy tabs** | Every live session as a pill (current = purple; working = spinner + glow; `?` = waiting); click to switch, `×` to close, `+` for a new session; subagent route chips on the right. |
+| **hy-dracula theme** | TUI skin + web dashboard theme from the Dracula spec (`#282A36` canvas, `#9AA5CE` legible muted text). `hy-jade` (graphite + jade) ships as an alternative. |
+| **One look everywhere** | zsh hook: `hermes`, `hermes --yolo`, `hermes -p <profile>`, `hermes chat`, `hermes dashboard` (web chat runs the same TUI build) and `hy` share one build. Admin subcommands and `-z` go straight to the real binary. |
 
 📖 Full guide in Vietnamese (install, architecture, customising, testing, troubleshooting): [docs/HUONG-DAN.md](docs/HUONG-DAN.md)
 
@@ -89,9 +90,10 @@ The build is stamped with the Hermes commit and source state. After `hermes upda
 | `components/appChrome.tsx` | `powerline.tsx` | rename `StatusRule` → `StatusRuleClassic`, append | **required** → stock TUI |
 | `lib/prompt.ts` | `prompt.ts` | rename `composerPromptText`, append | **required** → stock TUI |
 | `components/appLayout.tsx` | `promptPrefix.tsx` | rename `PromptPrefix`, append, one insert above the input rows | **required** → stock TUI |
-| `components/markdown.tsx` | `codeview.tsx` | rename `renderTable` → `renderTableClassic`, append, one insert in the fenced-code branch | optional → stock code/table rendering, bar unaffected |
+| `components/markdown.tsx` | `codeview.tsx` | rename `renderTable` → `renderTableClassic`, append, 9 one-line inserts (code fence, heading, rule, bullet, number, quote, inline code, bold, italic) | optional → stock markdown, bar unaffected |
+| `components/messageLine.tsx` | — | one insert: injected notices → result card | optional → raw notice text |
 | `app/overlayStore.ts` | `bridge.ts` | append (publishes `globalThis.__hy` for the widgets) | optional → widgets stay hidden |
-| `app/liveSessions.ts`, `app/useMainApp.ts` | — | one line each (session roster + switcher for the tabs) | optional → tabs stay hidden |
+| `app/liveSessions.ts`, `app/useMainApp.ts` | — | session roster; activate / close / new-session actions for the tabs | optional → tabs stay hidden |
 
 Optional pieces are skipped one by one with a `skipped (optional): …` line; the rest still builds. At runtime every piece has its own guard: `HERMES_CODEVIEW=0` restores stock code/tables, `HY_SIDEBAR=0` / `HY_TABS=0` keep the widgets closed, and the widgets render nothing when the bridge is absent (plain stock Hermes), so installing the widgets can never clutter an un-powerlined TUI. Widget errors are caught by Hermes' own widget error boundary; a broken code panel falls back to the stock renderer for that block.
 
@@ -144,7 +146,8 @@ Values turn orange, then red, at: CPU/GPU 70/90 %, RAM 75/90 %, disk 85/95 %, te
 - `hermes-powerline doctor` — inject + typecheck + build in a throwaway dir.
 - Simulate a Hermes update: copy the Hermes TUI to a scratch dir (symlink `node_modules`, `apps/shared`), edit an anchor there, and run `HERMES_AGENT_DIR=<copy> hermes-powerline doctor`. Breaking `markdown.tsx` or `liveSessions.ts` must print `skipped (optional)` and still build; breaking `StatusRule` must report *not compatible* and `ensure` must exit non-zero (the launcher then runs stock `hermes`).
 - Visual checks: run the TUI in `tmux` (`COLORTERM=truecolor`), `tmux capture-pane -e`, render the ANSI to PNG. Quit test TUIs with `/quit` — killing them leaves orphaned live sessions in the gateway until it restarts.
-- Widgets hot-reload: Hermes watches `~/.hermes/tui-widgets/`, so saving a `widgets/*.mjs` file applies it to running TUIs.
+- Widgets: the installed files are symlinks, so editing the repo does not trigger Hermes' directory watcher — run `/widgets-reload` in the TUI (or restart it).
+- Design references: OpenCode and Crush sidebars, the Dracula spec (draculatheme.com/spec) and its VS Code / Vim themes (256-colour codes), WCAG contrast (muted text `#9AA5CE` ≈ 5.9:1 on `#282A36`; `#6272A4` only for rules/hints).
 
 ## Known limits
 

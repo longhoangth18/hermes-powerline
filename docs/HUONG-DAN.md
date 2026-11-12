@@ -11,15 +11,17 @@ Tài liệu này mô tả **toàn bộ** hệ giao diện "hy" cho Hermes Agent:
 | Thanh trạng thái powerline (2 dòng) | `src/powerline.tsx`, `src/prompt.ts`, `src/promptPrefix.tsx` | Dòng 1: YOLO · trạng thái · model · context · t/s · cache · độ trễ … thư mục · nhánh · đồng hồ. Dòng 2: user · host · agent … CPU · GPU · RAM · ổ đĩa · nhiệt độ. Mỗi thanh **đậm ở mép → nhạt dần vào giữa** (đối xứng trái/phải), giữa các ô là vạch `›` xanh lá mảnh. |
 | Khung code / diff / bảng | `src/codeview.tsx` | Code block thành "khung editor": chip ngôn ngữ + icon, số dòng, tô màu cú pháp ~30 ngôn ngữ (comment/docstring nhiều dòng, hàm, kiểu, hằng, decorator, lệnh shell, cờ `-x`, biến `$VAR`, key JSON/YAML, thẻ HTML, CSS). Diff có tên file + `+N −M`, số dòng cũ/mới, nền xanh/đỏ, code trong diff cũng tô màu. Bảng có viền bo góc, header nổi, cột số căn phải. |
 | Cầu nối cho widget | `src/bridge.ts` | Đưa store nội bộ của TUI ra `globalThis.__hy` để widget đọc dữ liệu realtime. |
-| Sidebar bên phải | `widgets/hy-sidebar.mjs` | Phiên, thư mục/nhánh, thanh context mượt, model, số call/token/cache, **skill đang nạp (spinner + ánh sáng chạy) / đã nạp**, tool đang chạy kèm đồng hồ, subagent, todo, file đã sửa, trạng thái MCP. |
-| Thanh tab phiên | `widgets/hy-tabs.mjs` | Mỗi phiên đang sống là một "viên thuốc" bấm được; phiên hiện tại màu xanh lá; phiên đang chạy có spinner + ánh sáng chạy. |
-| Theme TUI | `skins/hy-jade.yaml` | Skin `hy-jade`: xám graphite + xanh lá `#5FD75F`, logo/banner đổi dải xanh. |
-| Theme web dashboard | `dashboard-themes/hy-jade.yaml` | Cùng bảng màu cho `hermes dashboard` và webchat; font mono là JetBrainsMono Nerd Font để webchat vẽ được icon. |
+| Sidebar bên phải | `widgets/hy-sidebar.mjs` | Thứ tự: tiêu đề · model · thanh context · call/token/cache → **TODO** (thanh tiến độ, bước ▶ đang làm, **luồng phân việc**: subagent đang chạy cho bước đó hiện lồng `↳ ⠼ coder goal 12s`; hết lượt vẫn giữ todo "lượt trước") → **SUBAGENTS** (chip mỗi route: sáng cam khi chạy, ✓ khi đã chạy, mờ khi chưa; dòng task đang chạy/đã xong `route › goal`) → RUNNING → **SKILLS gọn 2 hàng** (đang nạp nhấp nháy, đã dùng sáng và lên đầu, `+N`) → **MCP** (chấm trạng thái + chữ, *đang gọi* khi dùng, số lần gọi + bao lâu trước) → **FILES** (file ghi/sửa, nhãn subagent) → cwd/nhánh ghim đáy. |
+| Thanh tab phiên | `widgets/hy-tabs.mjs` | Mỗi phiên là "viên thuốc" bấm để chuyển, **`×` để đóng**, **`+` mở phiên mới**; phiên hiện tại màu tím; phiên đang chạy có spinner + ánh sáng; bên phải là chip route subagent. |
+| Theme TUI | `skins/hy-dracula.yaml` (mặc định), `skins/hy-jade.yaml` (phương án khác) | Dracula theo spec chính thức: nền `#282A36`, nhấn tím `#BD93F9`, chữ phụ `#9AA5CE` (đủ tương phản 5,9:1), logo tím→hồng. |
+| Theme web dashboard | `dashboard-themes/hy-dracula.yaml` (+ `hy-jade.yaml`) | Cùng bảng màu cho `hermes dashboard` và webchat; font mono JetBrainsMono Nerd Font để webchat vẽ được icon. |
+| Markdown đẹp | `src/codeview.tsx` (phần "markdown") | H1 dải nền, H2 `▍`, H3 `◆`, **đậm cam**, *nghiêng vàng*, `code` chip xanh, trích dẫn `▌` vàng, bullet/số màu, kẻ ngang `─ ◆ ─`. |
+| Thẻ kết quả | `src/codeview.tsx` (phần "system notice cards") | Khối `[ASYNC DELEGATION BATCH COMPLETE …]` Hermes chèn vào transcript thành thẻ: trạng thái, thời gian, từng task (✓/✗, goal, số call), JSON → `khoá: giá trị`, phần còn lại vẽ markdown. |
 | Plugin số liệu | `plugin/powerline-net/` | Plugin Hermes ghi t/s thật từng lần gọi, thời gian ra token đầu, lỗi API (4xx/5xx/timeout). |
 | Hook zsh | `shell/hermes-powerline.zsh` | Cho `hermes`, `hermes --yolo`, `hermes -p <profile>`, `hermes chat`, `hermes dashboard`, `hy` **dùng chung một bản build**. |
 | Launcher / builder | `bin/hermes-powerline` | Dựng bản TUI đã chèn code, tự build lại khi Hermes đổi, tự quay về TUI gốc nếu không hợp. |
 
-Màu dùng **đúng mã xterm-256** (xám trung tính, các ô màu chuẩn) vì trong tmux/Termius Hermes chỉ xuất 256 màu. Màu xám "pha xanh" như `#1D2026` sẽ bị làm tròn thành ô 59 (`#5f5f5f`) và trông xám bạc. Với màu nền xanh/đỏ của diff, mã hex được chọn sao cho thuật toán làm tròn của `chalk` rơi đúng ô 22/52.
+Màu nhận biết **độ sâu màu** (`HY` trong `src/prompt.ts`, cầu nối đưa cho widget): truecolor (iTerm/Ghostty/VS Code/`COLORTERM=truecolor`) dùng đúng tông Dracula; 256 màu (tmux, Terminal.app mặc định) dùng mã của theme `dracula/vim` (nền 236/235/234, chữ 253, xanh 84, hồng 212, tím 141, cyan 117, cam 215, vàng 228, đỏ 203, comment 61). Khi sidebar mở, powerline bỏ các ô trùng (model, context, cache, thư mục/nhánh, subagent). Màu xám "pha xanh" như `#1D2026` sẽ bị làm tròn thành ô 59 (`#5f5f5f`) và trông xám bạc. Với màu nền xanh/đỏ của diff, mã hex được chọn sao cho thuật toán làm tròn của `chalk` rơi đúng ô 22/52.
 
 ---
 
@@ -85,9 +87,10 @@ Bản build được đóng dấu (stamp) theo commit Hermes + nội dung file n
 | `components/appChrome.tsx` | `powerline.tsx` | đổi `StatusRule` → `StatusRuleClassic`, nối file | **bắt buộc** → dùng TUI gốc + thông báo |
 | `lib/prompt.ts` | `prompt.ts` | đổi tên `composerPromptText`, nối file | **bắt buộc** |
 | `components/appLayout.tsx` | `promptPrefix.tsx` | đổi tên `PromptPrefix`, nối file, chèn 1 dòng | **bắt buộc** |
-| `components/markdown.tsx` | `codeview.tsx` | đổi `renderTable` → `renderTableClassic`, nối file, chèn 1 nhánh ở chỗ vẽ code fence | tuỳ chọn → code/bảng kiểu gốc, thanh vẫn chạy |
+| `components/markdown.tsx` | `codeview.tsx` | đổi `renderTable` → `renderTableClassic`, nối file, 9 điểm chèn 1 dòng (code fence, tiêu đề, kẻ ngang, bullet, số, trích dẫn, inline code, đậm, nghiêng) | tuỳ chọn → markdown kiểu gốc, thanh vẫn chạy |
 | `app/overlayStore.ts` | `bridge.ts` | nối file | tuỳ chọn → widget tự ẩn |
-| `app/liveSessions.ts`, `app/useMainApp.ts` | — | chèn 1 dòng mỗi file | tuỳ chọn → thanh tab tự ẩn |
+| `app/liveSessions.ts`, `app/useMainApp.ts` | — | chèn danh sách phiên + hàm chuyển/đóng/mở phiên | tuỳ chọn → thanh tab tự ẩn |
+| `components/messageLine.tsx` | — | chèn 1 nhánh: thông báo hệ thống → thẻ kết quả | tuỳ chọn → hiện chữ thô |
 
 Lớp bảo vệ:
 
@@ -141,7 +144,7 @@ Trong Hermes: `/hy-sidebar` bật/tắt sidebar, `/hy-tabs` bật/tắt tab, `^X
 | Thêm dữ liệu cho widget | `src/bridge.ts` (thêm getter) hoặc thêm một INSERT tuỳ chọn trong `bin/hermes-powerline` (khối `INSERTS`). |
 | Thêm điểm chèn mới | `SPECS` / `INSERTS` trong `bin/hermes-powerline`. Anchor phải xuất hiện **đúng 1 lần**; đánh dấu `required=False` nếu thiếu nó vẫn sống được. |
 
-Widget được Hermes **tự nạp lại** khi file trong `~/.hermes/tui-widgets/` đổi (đã symlink tới repo), nên sửa widget là thấy ngay. Sửa `src/*` thì chạy `hermes-powerline rebuild` (hoặc mở lại `hermes`, stamp đổi là tự build).
+Widget là symlink tới repo nên sửa trong repo **không** tự nạp lại: gõ `/widgets-reload` trong Hermes (hoặc mở lại). Sửa `src/*` thì chạy `hermes-powerline rebuild` (hoặc mở lại `hermes`, stamp đổi là tự build).
 
 ---
 
@@ -184,3 +187,12 @@ Widget được Hermes **tự nạp lại** khi file trong `~/.hermes/tui-widget
 ~/.hermes/config.yaml              ← display.skin: hy-jade, dashboard.theme: hy-jade,
                                      display.sections.thinking: expanded (reasoning không bị gập)
 ```
+
+---
+
+## 10. Tham khảo thiết kế (đã nghiên cứu)
+
+- Sidebar OpenCode (rộng 42 cột, Context → MCP → Todo, cwd:branch ghim đáy) và Crush (`TIÊU ĐỀ ─────`, chấm trạng thái + chữ, "…và N nữa"): github.com/anomalyco/opencode, github.com/charmbracelet/crush.
+- Dracula spec: draculatheme.com/spec (bảng màu, cú pháp); markdown theo theme VS Code Dracula; mã 256 màu theo `dracula/vim`.
+- Tương phản WCAG: `#6272A4` trên `#282A36` chỉ 3:1 → chỉ dùng cho kẻ vạch/gợi ý; chữ phụ dùng `#9AA5CE` (5,9:1). Trạng thái luôn kèm ký hiệu/chữ, không chỉ dựa vào màu.
+- Status bar vs sidebar: thông tin chi tiết ở sidebar, thanh trạng thái chỉ giữ thứ sidebar không có — không trùng lặp.

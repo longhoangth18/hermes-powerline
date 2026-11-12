@@ -152,6 +152,42 @@ INSERTS = {
          "            {lang && !isDiff && <Text color={t.color.muted}>{'─ ' + lang}</Text>}",
          "          __plCodeBlock(block, fence[2]!.trim(), t, cols, key) ?? <Box flexDirection=\"column\" key={key} paddingLeft={2}>\n"
          "            {lang && !isDiff && <Text color={t.color.muted}>{'─ ' + lang}</Text>}"),
+        # Markdown (Dracula): headings, rule, bullets, numbers, quotes, inline code, bold, italic.
+        ("      const heading = line.match(HEADING_RE)?.[2]\n",
+         "      const __plH = PL_CV_ON ? line.match(HEADING_RE) : null\n\n"
+         "      if (__plH) {\n        start('heading')\n        nodes.push(__plHeading(__plH[1]!.length, __plH[2]!, t, cols, key))\n        i++\n\n        continue\n      }\n\n"
+         "      const heading = line.match(HEADING_RE)?.[2]\n"),
+        ("      if (HR_RE.test(line)) {\n        start('rule')\n",
+         "      if (HR_RE.test(line)) {\n        start('rule')\n\n"
+         "        if (PL_CV_ON) {\n          nodes.push(__plRule(t, cols, key))\n          i++\n\n          continue\n        }\n\n"),
+        ("              <Text color={t.color.muted}>{marker} </Text>",
+         "              <Text color={__plBulletColor(t, bullet[1]!, task)}>{__plBullet(marker, bullet[1]!, task)} </Text>"),
+        ("              <Text color={t.color.muted}>{numbered[2]}. </Text>",
+         "              <Text bold={PL_CV_ON} color={__plNumColor(t)}>{numbered[2]}. </Text>"),
+        ("                <Text color={t.color.muted} wrap=\"wrap-trim\">\n                  │ <MdInline t={t} text={ql.text} />",
+         "                <Text color={__plQuoteColor(t)} italic={PL_CV_ON} wrap=\"wrap-trim\">\n                  {__plQuoteBar(t)}<MdInline t={t} text={ql.text} />"),
+        ("        <Text color={t.color.accent} dimColor key={parts.length}>\n          {m[7]}\n        </Text>",
+         "        __plInlineCode(m[7], t, parts.length) ?? <Text color={t.color.accent} dimColor key={parts.length}>\n          {m[7]}\n        </Text>"),
+        ("        <Text bold key={parts.length}>\n          <MdInline t={t} text={m[8] ?? m[9]!} />",
+         "        <Text bold color={__plBoldColor(t)} key={parts.length}>\n          <MdInline t={t} text={m[8] ?? m[9]!} />"),
+        ("        <Text italic key={parts.length}>\n          <MdInline t={t} text={m[10] ?? m[11]!} />",
+         "        <Text color={__plItalicColor(t)} italic key={parts.length}>\n          <MdInline t={t} text={m[10] ?? m[11]!} />"),
+    ],
+    # System notices injected as user messages (async delegation results …) → card (optional).
+    "components/messageLine.tsx": [
+        ("    if (msg.role === 'user') {\n      const segments = splitComposerHighlights(msg.text)\n",
+         "    const __plCard =\n"
+         "      msg.role === 'user'\n"
+         "        ? (globalThis as { __plNoticeCard?: (text: string, t: unknown, cols: number) => unknown }).__plNoticeCard?.(\n"
+         "            msg.text,\n"
+         "            t,\n"
+         "            transcriptBodyWidth(cols, msg.role, t.brand.prompt, TERMUX_TUI_MODE)\n"
+         "          )\n"
+         "        : null\n\n"
+         "    if (__plCard) {\n"
+         "      return __plCard as never\n"
+         "    }\n\n"
+         "    if (msg.role === 'user') {\n      const segments = splitComposerHighlights(msg.text)\n"),
     ],
     # hy tabs: the live-session roster + the session activator (optional, insert-only).
     "app/liveSessions.ts": [
@@ -162,6 +198,8 @@ INSERTS = {
     "app/useMainApp.ts": [
         ("  const appActions = useMemo(\n",
          "  ;(globalThis as { __hyActivateSession?: unknown }).__hyActivateSession = session.activateLiveSession\n"
+         "  ;(globalThis as { __hyCloseSession?: unknown }).__hyCloseSession = closeLiveSession\n"
+         "  ;(globalThis as { __hyNewSession?: unknown }).__hyNewSession = () => session.newLiveSession()\n"
          "  const appActions = useMemo(\n"),
     ],
 }

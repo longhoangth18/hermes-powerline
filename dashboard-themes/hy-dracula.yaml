@@ -1,0 +1,58 @@
+# hy Dracula — the hermes-powerline look for the Hermes web dashboard (and its web chat).
+# Same palette as the TUI skin skins/hy-dracula.yaml (draculatheme.com/spec).
+# Install: ~/.hermes/dashboard-themes/hy-dracula.yaml, then `hermes config set dashboard.theme hy-dracula`.
+name: hy-dracula
+label: hy Dracula
+description: Dracula spec palette — matches the hy powerline TUI
+palette:
+  background: '#282A36'
+  midground: '#F8F8F2'
+  foreground:
+    hex: '#BD93F9'
+    alpha: 0
+  warmGlow: 'rgba(189, 147, 249, 0.18)'
+  noiseOpacity: 0.35
+typography:
+  fontSans: 'Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif'
+  # Nerd Font first so the embedded TUI (web chat) draws the powerline glyphs and icons.
+  fontMono: '"JetBrainsMono Nerd Font Mono", "JetBrainsMono Nerd Font", "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace'
+  baseSize: 15px
+  lineHeight: '1.55'
+layout:
+  radius: 0.6rem
+  density: comfortable
+colorOverrides:
+  card: '#21222C'
+  cardForeground: '#F8F8F2'
+  popover: '#21222C'
+  popoverForeground: '#F8F8F2'
+  primary: '#BD93F9'
+  primaryForeground: '#191A21'
+  secondary: '#44475A'
+  secondaryForeground: '#F8F8F2'
+  muted: '#343746'
+  mutedForeground: '#9AA5CE'
+  accent: '#FF79C6'
+  accentForeground: '#191A21'
+  destructive: '#FF5555'
+  destructiveForeground: '#191A21'
+  success: '#50FA7B'
+  warning: '#FFB86C'
+  border: '#44475A'
+  input: '#343746'
+  ring: '#BD93F9'
+componentStyles:
+  sidebar:
+    background: '#21222C'
+    borderColor: '#44475A'
+  header:
+    background: '#191A21'
+    borderColor: '#44475A'
+  tab:
+    activeBackground: '#BD93F9'
+    activeColor: '#191A21'
+  progress:
+    fill: '#BD93F9'
+  badge:
+    background: '#44475A'
+    color: '#50FA7B'

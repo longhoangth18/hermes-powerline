@@ -109,7 +109,7 @@ function plpConf(): PlpConf {
   if (typeof edgeRaw === 'string' && /^#[0-9a-f]{6}$/i.test(edgeRaw)) {
     conf.edge = edgeRaw
   } else if (edgeRaw !== false && conf.palette === 'mono') {
-    conf.edge = '#5FD75F'
+    conf.edge = '#50FA7B' // Dracula green
   }
 
   return conf
@@ -122,18 +122,57 @@ const PLP_CONF = plpConf()
 // it looks the same with or without truecolor (tmux, SSH clients). It stops at
 // a mid grey so plain white text stays readable on every step. The separators
 // are one thin chevron in the edge colour (or, with edgeThin: false, the 2-cell bold band).
-export const PL_GRAYS = [
-  '#1C1C1C',
-  '#262626',
-  '#303030',
-  '#3A3A3A',
-  '#444444',
-  '#4E4E4E',
-  '#585858',
-  '#626262',
-  '#6C6C6C',
-  '#767676'
-]
+// ── hy theme: Dracula, colour-depth aware ───────────────────────────────
+// Truecolor terminals get the real Dracula canvas tones. Under 256 colours
+// (tmux clamps to 256; Apple Terminal without COLORTERM is 256 too) a tinted
+// dark like #282A36 rounds to cube 59 (#5f5f5f), so backgrounds fall back to
+// neutral greys that both of Hermes' downgrades map exactly. Accents stay the
+// Dracula hexes — they round to close neighbours either way.
+// Mirrors hermes-ink/colorize.ts: tmux → 256; COLORTERM / HERMES_TUI_TRUECOLOR → 24-bit.
+export const HY_TRUECOLOR = (() => {
+  const e = process.env
+
+  if (e.TMUX) {
+    return false
+  }
+
+  if (/^(?:1|true|yes|on)$/i.test((e.HERMES_TUI_TRUECOLOR ?? '').trim()) || /truecolor|24bit/i.test(e.COLORTERM ?? '')) {
+    return true
+  }
+
+  return /^(?:iTerm\.app|WezTerm|vscode|ghostty|Hyper|WarpTerminal|kitty|Tabby)$/.test(e.TERM_PROGRAM ?? '') || /kitty|ghostty|wezterm|alacritty|foot/.test(e.TERM ?? '')
+})()
+
+const T24 = HY_TRUECOLOR
+
+export const HY = {
+  truecolor: T24,
+  // Canvas + surfaces — Dracula spec shades; 256 colours use dracula/vim's xterm codes.
+  bg: T24 ? '#282A36' : '#303030', //          Background      | 236
+  deep: T24 ? '#21222C' : '#262626', //        Dark (sidebar)  | 235
+  deeper: T24 ? '#191A21' : '#1C1C1C', //      Darker          | 234
+  surface: T24 ? '#343746' : '#3A3A3A', //     Light           | 237
+  line: T24 ? '#44475A' : '#444444', //        Selection       | 238
+  raised: T24 ? '#4D5066' : '#4E4E4E', //                      | 239
+  // Text. `dim` is the legible muted label (#9AA5CE ≈ 5.9:1 on #282A36);
+  // `comment` (3:1) is only for rules, hints and code comments.
+  fg: T24 ? '#F8F8F2' : '#DADADA', //          Foreground      | 253
+  dim: T24 ? '#9AA5CE' : '#AFAFD7',
+  comment: T24 ? '#6272A4' : '#5F5FAF', //     Comment         | 61
+  cyan: T24 ? '#8BE9FD' : '#87D7FF', //                        | 117
+  green: T24 ? '#50FA7B' : '#5FFF87', //                       | 84
+  orange: T24 ? '#FFB86C' : '#FFAF5F', //                      | 215
+  pink: T24 ? '#FF79C6' : '#FF87D7', //                        | 212
+  purple: T24 ? '#BD93F9' : '#AF87FF', //                      | 141
+  red: T24 ? '#FF5555' : '#FF5F5F', //                         | 203
+  yellow: T24 ? '#F1FA8C' : '#FFFF87' //                       | 228
+}
+
+// Powerline ramp, dark → light. Truecolor: Dracula canvas tones up to Comment
+// blue; 256 colours: exact xterm greys (identical under both downgrades).
+export const PL_GRAYS = T24
+  ? ['#191A21', '#21222C', '#282A36', '#2E303E', '#343746', '#3B3E50', '#44475A', '#4F5268', '#595D78', '#6272A4']
+  : ['#1C1C1C', '#262626', '#303030', '#3A3A3A', '#444444', '#4E4E4E', '#585858', '#626262', '#6C6C6C', '#767676']
 
 export const plGray = (i: number) => PL_GRAYS[Math.max(0, Math.min(PL_GRAYS.length - 1, Math.round(i)))]!
 
@@ -149,7 +188,7 @@ export const plInk = (_bg: string) => '#FFFFFF'
 export type PlTone = 'accent' | 'err' | 'warn'
 
 /** Accent / alarm text colour tuned for a dark or a light grey background. */
-export const plTone = (tone: PlTone, bg: string, edge = PLP_CONF.edge ?? '#5FD75F') =>
+export const plTone = (tone: PlTone, bg: string, edge = PLP_CONF.edge ?? '#50FA7B') =>
   plIsLight(bg)
     ? { accent: '#005F00', err: '#AF0000', warn: '#875F00' }[tone]
     : { accent: edge, err: '#FF5F5F', warn: '#FFAF5F' }[tone]

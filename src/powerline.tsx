@@ -567,6 +567,19 @@ function plTruncStart(s: string, w: number): string {
   return `\u2026${chars.join('')}`
 }
 
+const PL_SIDEBAR_DUPES = new Set(['model', 'context_detail', 'context_pct', 'cache_hit', 'title', 'compressions', 'bg_subagents'])
+
+/** Is the hy sidebar widget open in the right rail? (bridge published by bridge.ts) */
+const __plSidebarOpen = (): boolean => {
+  try {
+    const ov = (globalThis as { __hy?: { overlay?: { get?: () => { ambient?: { appId: string }[] } } } }).__hy?.overlay?.get?.()
+
+    return Boolean(ov?.ambient?.some(a => a.appId === 'hy-sidebar'))
+  } catch {
+    return false
+  }
+}
+
 function PowerlineRule(p: StatusRuleProps) {
   const { busy, cols, t, usage } = p
   const net = usePlNet()
@@ -577,7 +590,12 @@ function PowerlineRule(p: StatusRuleProps) {
   const ic = (glyph: string) => (PL_CONF.icons ? glyph.trimEnd() + __PL_LOOK.gap : '')
   const mono = __PL_LOOK.mono
   const edge = __PL_LOOK.edge
-  const ok = (name: string) => p.statusBarFields == null || p.statusBarFields.has(name)
+  // With the hy sidebar open, cells it already shows (model, context, cache, title/folder/
+  // branch, compressions, subagents) leave the bar — no duplicated information. The sidebar
+  // hides itself on narrow terminals, and then the bar shows everything again.
+  const sideOpen = __plSidebarOpen()
+  const ok = (name: string) =>
+    (p.statusBarFields == null || p.statusBarFields.has(name)) && !(sideOpen && PL_SIDEBAR_DUPES.has(name))
 
   // Palette — Dracula by default; `palette: "skin"` follows /skin instead.
   const C = plPalette(t)
@@ -773,7 +791,7 @@ function PowerlineRule(p: StatusRuleProps) {
   // only as wide as its content, and never takes more than 45% of the row.
   const rCells: { bg: string; bold?: boolean; fg: string; text: string }[] = []
 
-  if (sharedW > 0) {
+  if (sharedW > 0 && !sideOpen) {
     const room = Math.max(0, Math.floor(width * 0.45) - durPart)
 
     if (title) {
