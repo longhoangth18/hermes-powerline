@@ -655,13 +655,16 @@ export default function register(sdk) {
           h(Text, { color: c.cyan }, fit(info.model || '?', 24)),
           info.reasoning_effort ? ` · ${info.reasoning_effort}` : ''
         ),
-        h(
-          Text,
-          { wrap: 'truncate-end' },
-          h(Bar, { c0: c.accent, c1: end, pct, track: c.surface, width: W - 17 }),
-          h(Text, { bold: true, color: end }, ` ${pct == null ? '–' : pct < 10 ? pct.toFixed(1) : Math.round(pct)}%`),
-          h(Text, { color: c.dim }, ` ${short(usage.context_used)}/${short(usage.context_max)}`)
-        ),
+        // Before the first API call there is no context figure: say so instead of an empty gauge.
+        pct == null
+          ? h(Text, { color: c.idle ?? c.dim, wrap: 'truncate-end' }, '○ fresh session · no calls yet')
+          : h(
+              Text,
+              { wrap: 'truncate-end' },
+              h(Bar, { c0: c.accent, c1: end, pct, track: c.surface, width: W - 17 }),
+              h(Text, { bold: true, color: end }, ` ${pct < 10 ? pct.toFixed(1) : Math.round(pct)}%`),
+              h(Text, { color: c.dim }, ` ${short(usage.context_used)}/${short(usage.context_max)}`)
+            ),
         stats.length ? h(Text, { color: c.comment, wrap: 'truncate-end' }, stats.join(' · ')) : null
       ),
       4 + Math.min(2, Math.ceil(Math.min(title.length, W * 2) / W)) + (stats.length ? 1 : 0)
