@@ -1,31 +1,40 @@
-"""plan-auto: plan mode ON by default for every interactive user turn.
+"""plan-auto: file edits in an interactive session wait for an approved plan.
 
 The plan-mode plugin has no "default on" setting: it turns on only via /plan, /planmode on or the
-agent calling plan_mode(on) itself, and models skip that. This companion hook does the agent's
-call for it at the start of each fresh user turn, through plan-mode's own ``_run_command`` (the
-same path its tool uses), so all of plan-mode's guards, state and notes stay in charge.
+agent calling plan_mode(on) itself, and models skip that. plan-auto turns it on for the agent —
+lazily, at the moment the agent first tries to change something:
 
-* Activation is agent-owned (``entered_by="agent"``): for a request that changes nothing — a
-  question, inspection, research, security ops — the agent may call ``plan_mode`` action ``off``
-  and carry on. Once the user answers a plan card it becomes user-owned, as plan-mode decides.
-* The ``on`` result (planning note + agent note, exactly what the agent would get from calling
-  ``plan_mode on``) is returned as this turn's context, so hook order does not matter.
-* Skipped: plan mode already on or executing an approved plan; subagents/curator; cron; one-shot
-  (-z); non-terminal surfaces (messaging platforms); slash commands; injected messages
-  ("[ASYNC ...]", plan-mode's own implement turn); and opt-outs ("làm luôn", "không cần plan",
-  "skip plan", "no plan"). ``HERMES_PLAN_AUTO=0`` disables it.
+* ``pre_tool_call``: the first ``write_file`` / ``patch``, or a ``delegate_task`` to the ``coder``
+  route, in a session with no plan running is blocked, and plan mode is turned on through
+  plan-mode's own ``_run_command`` (the same path its ``plan_mode`` tool uses). The block message
+  carries plan-mode's planning note, so the agent plans in the same turn and submits it for the
+  approval card. After approval plan-mode's executing phase lets the edits through.
+* ``pre_llm_call`` only remembers, per session, whether the user's message opted out
+  ("làm luôn", "không cần plan", "skip plan", "no plan") and what the request was (the plan's task).
 
-Never raises: any failure returns None and leaves the turn untouched.
+Why lazy: turning plan mode on at the start of every turn cost one extra model round-trip
+(``plan_mode off``) on every question or command — 7-10 s of dead air before the answer. Now a
+request that changes nothing never touches plan mode.
+
+Gated: ``write_file``, ``patch``, and ``delegate_task`` to the code route — including tasks with no
+``profile``, which ``delegation.backends.profile_routes.default`` (coder) receives. Not gated (cannot
+be told apart from reads): ``terminal`` and ``execute_code``; SOUL routes code to the coder anyway.
+
+Skipped: plan mode already on or executing an approved plan; a turn that already went through a
+plan (a small follow-up edit after the last todo does not re-arm it); delegated children (the coder
+doing approved work); cron; one-shot runs (-z, -q/--query/--query-file, -Q); non-terminal surfaces
+(messaging platforms, desktop); opted-out turns. ``HERMES_PLAN_AUTO=0`` disables it.
+Never raises: any failure leaves the tool call alone.
 """
 from __future__ import annotations
 
-import logging
 import os
 import re
 import sys
+import threading
+import time
+from collections import OrderedDict
 from typing import Any
-
-log = logging.getLogger("plan-auto")
 
 _SURFACES = {"", "cli", "terminal", "tui", "local"}  # TUI turns derive surface "local"
 _SKIP_PLATFORMS = {"subagent", "curator", "cron"}
@@ -34,9 +43,36 @@ _OPT_OUT = re.compile(
     r"kh[ôo]ng\s+c[ầa]n\s+l[ậa]p\s+k[ếe]\s+ho[ạa]ch",
     re.IGNORECASE,
 )
-_INJECTED = re.compile(r"^\s*\[[A-Z/][^\]\n]{0,120}\]")
+# Turns Hermes injects on its own (delegation results, background notices, /plan's wrapper) keep
+# the user's request; everything else the user typed — even "/Users/…" or "[WIP] …" — is a new one.
+_INJECTED = re.compile(r"^\s*\[(?:ASYNC |BACKGROUND |SYSTEM|/plan\b)")
 _IMPLEMENT_PREFIX = "Implement the approved plan at "
+_EDIT_TOOLS = {"write_file", "patch"}
+_CODE_ROUTE = "coder"
+_ONESHOT_FLAGS = {"-z", "--oneshot", "-q", "--query", "--query-file", "-Q", "--quiet-query"}
+_route_cache: dict[str, Any] = {"mtime": None, "default": _CODE_ROUTE}
 
+_TRACE = os.path.expanduser("~/.cache/plan-auto/trace.log")
+_turns: "OrderedDict[str, dict[str, Any]]" = OrderedDict()  # identity key → {"optout", "task"}
+_lock = threading.Lock()
+
+
+def _trace(line: str) -> None:
+    """One line per decision; HERMES_PLAN_AUTO_TRACE=0 turns it off."""
+    if os.environ.get("HERMES_PLAN_AUTO_TRACE", "1") == "0":
+        return
+    try:
+        os.makedirs(os.path.dirname(_TRACE), exist_ok=True)
+        if os.path.exists(_TRACE) and os.path.getsize(_TRACE) > 512_000:
+            os.replace(_TRACE, _TRACE + ".1")
+        with open(_TRACE, "a", encoding="utf-8") as fh:
+            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} pid={os.getpid()} {line}\n")
+    except Exception:
+        pass
+
+
+def _disabled() -> bool:
+    return os.environ.get("HERMES_PLAN_AUTO", "1").strip().lower() in {"0", "false", "off", "no"}
 
 
 def _plan_mode() -> tuple[Any, Any] | tuple[None, None]:
@@ -67,79 +103,144 @@ def _user_text(message: Any) -> str:
 
 
 def _oneshot() -> bool:
-    argv = sys.argv[1:]
-    return any(a in ("-z", "--oneshot") or a.startswith("--oneshot=") for a in argv)
+    """A run that answers and exits — nobody is there to approve a plan."""
+    return any(a in _ONESHOT_FLAGS or a.split("=", 1)[0] in _ONESHOT_FLAGS for a in sys.argv[1:])
 
 
-_TRACE = os.path.expanduser("~/.cache/plan-auto/trace.log")
-
-
-def _trace(line: str) -> None:
-    """One line per decision; HERMES_PLAN_AUTO_TRACE=0 turns it off."""
-    if os.environ.get("HERMES_PLAN_AUTO_TRACE", "1") == "0":
-        return
+def _default_route() -> str:
+    """Where a delegate_task without ``profile`` goes: delegation.backends.profile_routes.default."""
     try:
-        import time
-        os.makedirs(os.path.dirname(_TRACE), exist_ok=True)
-        if os.path.exists(_TRACE) and os.path.getsize(_TRACE) > 512_000:
-            os.replace(_TRACE, _TRACE + ".1")
-        with open(_TRACE, "a", encoding="utf-8") as fh:
-            fh.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} pid={os.getpid()} {line}\n")
+        home = os.environ.get("HERMES_HOME") or os.path.expanduser("~/.hermes")
+        path = os.path.join(home, "config.yaml")
+        mtime = os.path.getmtime(path)
+        if _route_cache["mtime"] != mtime:
+            import yaml  # Hermes depends on PyYAML
+
+            with open(path, encoding="utf-8") as fh:
+                cfg = yaml.safe_load(fh) or {}
+            d = (cfg.get("delegation") or {})
+            route = (((d.get("backends") or {}).get("profile_routes") or {}).get("default")
+                     if d.get("backend") == "profile_routes" else None)
+            _route_cache.update(mtime=mtime, default=str(route or "").strip())
+        return str(_route_cache["default"] or "")
     except Exception:
-        pass
+        return _CODE_ROUTE
 
 
-def _skip(reason: str) -> None:
-    _trace(f"skip: {reason}")
+def _identity(mod: Any, platform: str) -> Any:
+    """The session identity plan-mode itself would use, or None outside an interactive terminal."""
+    identity = mod.derive_session_identity(platform)
+    if identity.unsupported or identity.non_cli_without_key or not identity.key:
+        return None
+    if (identity.surface or "").strip().lower() not in _SURFACES:
+        return None
+    return identity
+
+
+def _wants_edit(tool_name: str, args: Any) -> bool:
+    """Does this call change files: an edit tool, or code work handed to the coder route?"""
+    a = args if isinstance(args, dict) else {}
+    if tool_name in _EDIT_TOOLS:
+        return True
+    if tool_name == "delegate_task":
+        tasks = a.get("tasks") if isinstance(a.get("tasks"), list) else [a]
+        top = str(a.get("profile") or "").strip()
+
+        def route(t: Any) -> str:
+            own = str(t.get("profile") or "").strip() if isinstance(t, dict) else ""
+            return own or top or _default_route()
+
+        return any(route(t) == _CODE_ROUTE for t in tasks)
+    if tool_name == "tool_call":  # Tool Search's dispatcher: judge the inner calls
+        calls = a.get("calls") if isinstance(a.get("calls"), list) else []
+        return any(
+            isinstance(c, dict) and _wants_edit(str(c.get("name") or ""), c.get("arguments") or {}) for c in calls
+        )
+    return False
+
+
+def pre_llm_call(**kwargs: Any) -> None:
+    """Remember the request and its opt-out for this session's tool calls. Returns nothing."""
+    try:
+        if _disabled():
+            return None
+        platform = str(kwargs.get("platform") or "").strip().lower()
+        if platform in _SKIP_PLATFORMS or kwargs.get("parent_session_id"):
+            return None
+        text = _user_text(kwargs.get("user_message")).strip()
+        # Injected turns (delegation results, plan-mode's implement turn) keep the user's request.
+        if text.startswith(_IMPLEMENT_PREFIX) or _INJECTED.match(text):
+            return None
+        _inst, mod = _plan_mode()
+        if mod is None:
+            return None
+        identity = _identity(mod, platform)
+        if identity is None:
+            return None
+        with _lock:
+            _turns.pop(identity.key, None)
+            _turns[identity.key] = {"optout": bool(_OPT_OUT.search(text)), "planned": False, "task": text[:500]}
+            while len(_turns) > 256:
+                _turns.popitem(last=False)
+    except Exception as exc:
+        _trace(f"error in pre_llm_call: {exc!r}")
     return None
 
 
-def pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
+def pre_tool_call(tool_name: str = "", args: Any = None, **kwargs: Any) -> dict[str, str] | None:
     try:
-        _trace(f"hook: platform={kwargs.get('platform')!r}")
-        if os.environ.get("HERMES_PLAN_AUTO", "1").strip() in {"0", "false", "off", "no"}:
+        if _disabled() or not _wants_edit(tool_name, args):
             return None
-        platform = str(kwargs.get("platform") or "").strip().lower()
-        if platform in _SKIP_PLATFORMS or kwargs.get("parent_session_id") or _oneshot():
-            return _skip(f"platform={platform!r} parent={bool(kwargs.get('parent_session_id'))} oneshot={_oneshot()}")
-        text = _user_text(kwargs.get("user_message")).strip()
-        if (not text or text.startswith("/") or text.startswith(_IMPLEMENT_PREFIX)
-                or _INJECTED.match(text) or _OPT_OUT.search(text)):
-            return _skip("message is a command, injected turn or opt-out")
-
+        if _oneshot():
+            return None
         inst, mod = _plan_mode()
         if inst is None:
-            return _skip("plan-mode instance not found")
-        if mod._cron_session_is_active():
-            return _skip("cron")
-        identity = mod.derive_session_identity(platform)
-        if identity.unsupported or identity.non_cli_without_key or not identity.key:
-            return _skip(f"no session identity ({identity!r})")
-        if (identity.surface or "").strip().lower() not in _SURFACES:
-            return _skip(f"surface={identity.surface!r}")
+            return None
+        if getattr(mod, "_delegated_child", lambda: False)() or mod._cron_session_is_active():
+            return None
+        # pre_tool_call gets no platform kwarg; plan-mode resolves the session from Hermes' context.
+        identity = _identity(mod, "")
+        if identity is None:
+            return None
         with inst._lock:
             _key, state = inst._state_for_hook(identity)
-        if state.get("active") or state.get("phase") == "executing":
-            return _skip("already planning/executing")
+        planning = state.get("active") or state.get("phase") == "executing"
+        with _lock:
+            entry = _turns.get(identity.key)
+            # Only an APPROVED plan (executing) counts — the agent switching plan mode off itself
+            # must not open the gate.
+            if state.get("phase") == "executing" and entry is not None:
+                entry["planned"] = True
+            turn = dict(entry or {})
+        if planning:
+            return None  # plan-mode's own guard (planning) or its approved run (executing) is in charge
+        if turn.get("optout"):
+            _trace(f"skip: {tool_name} — user opted out of planning")
+            return None
+        if turn.get("planned"):
+            _trace(f"skip: {tool_name} — this request's plan was approved earlier in the turn")
+            return None
 
-        result = inst._run_command("on", text[:500], entered_by="agent")
+        result = inst._run_command("on", str(turn.get("task") or ""), entered_by="agent")
         message = result.get("message", "") if isinstance(result, dict) else str(result or "")
         if not message.startswith("Plan mode is on"):
-            return _skip(f"plan-mode refused: {message[:200]!r}")
-        _trace("on: plan mode turned on for this turn")
+            _trace(f"skip: plan-mode refused activation: {message[:200]!r}")
+            return None
+        _trace(f"on: {tool_name} blocked, plan mode turned on")
         return {
-            "context": (
-                "[plan-auto] Plan mode was turned ON automatically for this request (the user's default).\n"
-                + message
-                + "\nIf this request changes nothing (a question, research, inspecting or running things, "
-                "security work), call plan_mode with action \"off\" first and then do it. Any request that "
-                "creates or edits files — however small — is planned and submitted for approval."
-            )
+            "action": "block",
+            "message": (
+                f"[plan-auto] `{tool_name}` was blocked: this request changes files, and the user's rule is "
+                "that every change gets a plan they approve first. Plan mode is now ON. Do not turn it off. "
+                "Write the plan for the user's request, show it, call plan_mode action \"submit\" and wait "
+                "for approval; after approval, carry out the plan (code goes to the coder route).\n" + message
+            ),
         }
-    except Exception as exc:  # never break a turn
-        _trace(f"error: {exc!r}")
+    except Exception as exc:  # never break a tool call
+        _trace(f"error in pre_tool_call: {exc!r}")
         return None
 
 
 def register(ctx) -> None:
     ctx.register_hook("pre_llm_call", pre_llm_call)
+    ctx.register_hook("pre_tool_call", pre_tool_call)

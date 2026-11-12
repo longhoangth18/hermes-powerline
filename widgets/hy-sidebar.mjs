@@ -49,6 +49,26 @@ const bridge = () => {
   return b && b.ui?.get && b.turn?.get && b.overlay?.get && b.patchOverlay ? b : null
 }
 
+// Subagent statuses that mean "still working" (same set as Hermes' live-agents dock).
+const IN_FLIGHT = new Set(['dispatched', 'finalizing', 'queued', 'running'])
+const inFlight = s => IN_FLIGHT.has(s?.status)
+
+// Every subagent of this session: in-turn ones AND background (async) delegations that outlive
+// the turn (bridge v3 roster); older bridges only know the in-turn list.
+const subsOf = turn => {
+  try {
+    const r = bridge()?.roster?.()
+
+    if (Array.isArray(r)) {
+      return r
+    }
+  } catch {
+    // fall back below
+  }
+
+  return turn?.subagents ?? []
+}
+
 const theme = () => {
   try {
     return { ...FALLBACK, ...(globalThis.__hy?.theme ?? {}) }
@@ -134,9 +154,11 @@ async function readSession(sid) {
           files.set(p, f)
         }
       } else if (fn === 'delegate_task') {
+        const top = typeof args.profile === 'string' && args.profile ? args.profile : ''
+
         for (const t of Array.isArray(args.tasks) ? args.tasks : [args]) {
           if (t && typeof t.goal === 'string') {
-            delegations.push({ goal: t.goal, profile: typeof t.profile === 'string' && t.profile ? t.profile : 'default' })
+            delegations.push({ goal: t.goal, profile: typeof t.profile === 'string' && t.profile ? t.profile : (top || routeConfig().def || 'default') })
           }
         }
       }
@@ -190,13 +212,78 @@ async function readSession(sid) {
         const goal = String(k.title ?? '').replace(/^Subagent:\s*/, '').replace(/…$/, '')
         const d = delegations.find(x => x.goal.startsWith(goal.slice(0, 40)) || goal.startsWith(x.goal.slice(0, 40)))
 
-        return { ...k, goal, profile: d?.profile ?? 'default' }
+        return { ...k, goal, profile: d?.profile ?? routeConfig().byModel.get(k.model) ?? 'default' }
       })
 
     return { delegations, files, kids, mcp, skills }
   } catch {
     return null
   }
+}
+
+// How Hermes routes a delegation: delegation.backends.profile_routes.default takes tasks with no
+// `profile`, and a subagent's model tells its route when exactly one profile uses that model.
+// Read lazily, re-read when config.yaml changes (checked at most every 10 s).
+let routeCfg = null
+
+function routeConfig() {
+  const now = Date.now()
+
+  if (routeCfg && now - routeCfg.at < 10_000) {
+    return routeCfg
+  }
+
+  const cfg = { at: now, byModel: new Map(), def: null, mtime: routeCfg?.mtime ?? 0 }
+
+  try {
+    const fs = process.getBuiltinModule?.('node:fs')
+    const home = process.env.HERMES_HOME?.trim() || `${process.env.HOME}/.hermes`
+    const root = /\/profiles\/[^/]+\/?$/.test(home) ? home.replace(/\/profiles\/[^/]+\/?$/, '') : home
+    const mtime = fs.statSync(`${root}/config.yaml`).mtimeMs
+
+    if (routeCfg && mtime === routeCfg.mtime) {
+      routeCfg.at = now
+
+      return routeCfg
+    }
+
+    cfg.mtime = mtime
+    const text = fs.readFileSync(`${root}/config.yaml`, 'utf8')
+    // The block ends at the next top-level KEY; column-0 comments inside it are fine in YAML.
+    const block = text.match(/^delegation:\n([\s\S]*?)(?=^[^\s#])/m)?.[1] ?? ''
+    const routesAt = block.indexOf('profile_routes:')
+
+    if (routesAt >= 0 && /^\s+backend:\s*["']?profile_routes/m.test(block)) {
+      cfg.def = block.slice(routesAt).match(/^\s+default:\s*["']?([\w.-]+)/m)?.[1] ?? null
+    }
+
+    const owners = new Map()
+
+    for (const r of routesList()) {
+      try {
+        const pc = fs.readFileSync(`${root}/profiles/${r}/config.yaml`, 'utf8')
+        const model = pc.match(/^model:\n(?:[ \t]+#.*\n)*[ \t]+(?:default|model):\s*["']?([^"'\n]+?)["']?\s*$/m)?.[1]
+
+        if (model) {
+          owners.set(model, [...(owners.get(model) ?? []), r])
+        }
+      } catch {
+        // a profile without a readable config simply has no model mapping
+      }
+    }
+
+    for (const [model, rs] of owners) {
+      if (rs.length === 1) {
+        cfg.byModel.set(model, rs[0])
+      }
+    }
+  } catch {
+    // keep defaults: no default route, no model mapping
+  }
+
+  routeCfg = cfg
+
+  return cfg
 }
 
 function routesList() {
@@ -233,7 +320,9 @@ function startLoader() {
       globalThis.__hyData = { ...globalThis.__hyData, data: res }
     }
 
-    loader.timer = setTimeout(run, ui?.busy ? DB_BUSY_MS : DB_IDLE_MS)
+    const working = ui?.busy || subsOf(bridge()?.turn.get()).some(inFlight)
+
+    loader.timer = setTimeout(run, working ? DB_BUSY_MS : DB_IDLE_MS)
     loader.timer.unref?.()
   }
 
@@ -261,8 +350,9 @@ function startLoader() {
       wasBusy = Boolean(ui?.busy)
     })
 
-    b.turn.listen(turn => {
-      const k = (turn?.tools ?? []).length * 1000 + (turn?.subagents ?? []).filter(s => s.status === 'running').length
+    const onWork = () => {
+      const turn = b.turn.get()
+      const k = (turn?.tools ?? []).length * 1000 + subsOf(turn).filter(inFlight).length
 
       if (k !== n) {
         clearTimeout(loader.timer)
@@ -271,14 +361,18 @@ function startLoader() {
       }
 
       n = k
-    })
+    }
+
+    b.turn.listen(onWork)
+    // A background delegation starting or finishing after the turn ended.
+    b.agents?.listen?.(onWork)
   }
 
   watch()
 }
 
 // Live subagent → route: match its goal against the delegate_task calls.
-function routeOf(goal, data) {
+function routeOf(goal, data, model) {
   const g = String(goal ?? '')
   const list = data?.delegations ?? []
 
@@ -290,7 +384,9 @@ function routeOf(goal, data) {
     }
   }
 
-  return null
+  // Not in the DB yet (the delegate_task row lands a moment later): a model only one profile uses
+  // names the route right away.
+  return (model && routeConfig().byModel.get(model)) || null
 }
 
 // Route states for chips (both widgets): active > failed > done > idle.
@@ -305,11 +401,11 @@ function routeStates() {
     }
   }
 
-  for (const s of bridge()?.turn.get()?.subagents ?? []) {
-    const r = routeOf(s.goal, hd.data)
+  for (const s of subsOf(bridge()?.turn.get())) {
+    const r = routeOf(s.goal, hd.data, s.model)
 
     if (r && state.has(r)) {
-      if (s.status === 'running' || s.status === 'queued') {
+      if (inFlight(s)) {
         state.set(r, 'active')
       } else if (state.get(r) !== 'active') {
         state.set(r, s.status === 'failed' || s.status === 'error' ? 'failed' : 'done')
@@ -547,12 +643,13 @@ export default function register(sdk) {
 
       const offTurn = b.turn.listen(bump)
       const offUi = b.ui.listen(bump)
+      const offAgents = b.agents?.listen?.(bump)
       let lastData = null
       const clock = setInterval(() => {
         const ui = b.ui.get()
         const turn = b.turn.get()
         const anim =
-          ui.busy || Date.now() < flashUntil || (turn.tools ?? []).length || (turn.subagents ?? []).some(s => s.status === 'running')
+          ui.busy || Date.now() < flashUntil || (turn.tools ?? []).length || subsOf(turn).some(inFlight)
 
         if (anim || globalThis.__hyData?.data !== lastData) {
           lastData = globalThis.__hyData?.data
@@ -563,6 +660,7 @@ export default function register(sdk) {
       return () => {
         offTurn()
         offUi()
+        offAgents?.()
         clearInterval(clock)
         clearTimeout(pending)
       }
@@ -715,7 +813,7 @@ export default function register(sdk) {
 
         // Task flow: work delegated while this step runs hangs under it.
         if (st === 'in_progress') {
-          for (const sa of (turn.subagents ?? []).filter(q => q.status === 'running' || q.status === 'queued').slice(0, 3)) {
+          for (const sa of subsOf(turn).filter(inFlight).slice(0, 3)) {
             const startMs = sa.startedAt ? (sa.startedAt < 1e12 ? sa.startedAt * 1000 : sa.startedAt) : 0
 
             body.push(
@@ -724,7 +822,7 @@ export default function register(sdk) {
                 { key: `tf${sa.id}`, wrap: 'truncate-end' },
                 h(Text, { color: c.comment }, '   ↳ '),
                 h(Text, { color: c.orange }, `${spin} `),
-                h(Text, { bold: true, color: c.pink }, `${routeOf(sa.goal, data) ?? 'task'} `),
+                h(Text, { bold: true, color: c.pink }, `${routeOf(sa.goal, data, sa.model) ?? 'task'} `),
                 h(Text, { color: c.dim }, fit(sa.goal, Math.max(6, W - 22))),
                 h(Text, { color: c.comment }, startMs ? `  ${dur(now - startMs)}` : '')
               )
@@ -752,7 +850,7 @@ export default function register(sdk) {
 
     // ── SUBAGENTS: route chips + live tasks + finished tasks ──
     const states = routeStates()
-    const subs = turn.subagents ?? []
+    const subs = subsOf(turn)
     const kids = data?.kids ?? []
 
     if (states.size || subs.length || kids.length) {
@@ -768,8 +866,8 @@ export default function register(sdk) {
       const live = subs.slice(-5)
 
       for (const s of live) {
-        const r = routeOf(s.goal, data) ?? 'task'
-        const running = s.status === 'running' || s.status === 'queued'
+        const r = routeOf(s.goal, data, s.model) ?? 'task'
+        const running = inFlight(s)
         const bad = s.status === 'failed' || s.status === 'error' || s.status === 'interrupted'
         const startMs = s.startedAt ? (s.startedAt < 1e12 ? s.startedAt * 1000 : s.startedAt) : 0
         const right = running
@@ -816,7 +914,7 @@ export default function register(sdk) {
         )
       }
 
-      const activeN = [...states.values()].filter(x => x === 'active').length + subs.filter(s => s.status === 'running' && !routeOf(s.goal, data)).length
+      const activeN = [...states.values()].filter(x => x === 'active').length + subs.filter(s => inFlight(s) && !routeOf(s.goal, data, s.model)).length
 
       section(
         'subs',

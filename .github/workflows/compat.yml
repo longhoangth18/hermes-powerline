@@ -40,6 +40,9 @@ jobs:
       - name: Shell syntax
         run: bash -n bin/hermes-powerline && bash -n install.sh && bash -n uninstall.sh
 
+      - name: plan-auto unit checks
+        run: python3 -I tests/test_plan_auto.py plugin/plan-auto
+
       - name: Widget syntax
         run: for f in widgets/*.mjs; do node --check "$f"; done
 

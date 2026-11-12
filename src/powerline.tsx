@@ -110,6 +110,8 @@ interface PlSeg {
   tone?: __PlTone
   /** Keep bg/fg as given even on the grey ramp (alarms must stay red). */
   fixed?: boolean
+  /** Idle/secondary cell: dim text, also under the mono palette. */
+  muted?: boolean
   w: number
 }
 
@@ -257,6 +259,202 @@ interface PlInbox {
 
 const PL_INBOX_MS = 60_000
 const PL_INBOX_KIND: Record<string, string> = { cron: 'cron', delegation: 'deleg', kanban: 'kanban', process: 'proc' }
+
+// ── todo progress ───────────────────────────────────────────────────────
+// The agent's todo_list, read from the TUI turn store through the widget bridge
+// (bridge.ts → globalThis.__hy.turn). Going through the OPTIONAL bridge instead
+// of importing turnStore keeps the REQUIRED bar build independent of it: if a
+// Hermes update moves the store, only this cell goes dark.
+// Hermes archives the list into the transcript when a turn ends; the cell then
+// lingers, dimmed, for PL_TODO_LINGER_MS and disappears.
+interface PlTodoItem {
+  content: string
+  status: string
+}
+
+interface PlTodos {
+  items: PlTodoItem[]
+  live: boolean
+}
+
+const PL_TODO_LINGER_MS = 60_000
+
+type __PlTurnStore = {
+  get?: () => { todos?: PlTodoItem[] } | undefined
+  listen?: (cb: (s: { todos?: PlTodoItem[] } | undefined) => void) => () => void
+}
+
+const __plTurnStore = (): __PlTurnStore | undefined => {
+  try {
+    return (globalThis as { __hy?: { turn?: __PlTurnStore } }).__hy?.turn
+  } catch {
+    return undefined
+  }
+}
+
+function usePlTodos(): null | PlTodos {
+  const [todos, setTodos] = useState<null | PlTodos>(null)
+
+  useEffect(() => {
+    if (process.env.HERMES_POWERLINE_TODO === '0') {
+      return
+    }
+
+    const store = __plTurnStore()
+    const ui = (globalThis as { __hy?: { ui?: { get?: () => { busy?: boolean; sid?: null | string }; listen?: (cb: () => void) => () => void } } })
+      .__hy?.ui
+
+    if (!store?.get || !store.listen) {
+      return
+    }
+
+    let linger: ReturnType<typeof setTimeout> | undefined
+    let shown: null | PlTodoItem[] = null
+    let shownLive = false
+    let sid = ui?.get?.()?.sid ?? null
+
+    const stopLinger = () => {
+      if (linger) {
+        clearTimeout(linger)
+        linger = undefined
+      }
+    }
+
+    const apply = () => {
+      const u = ui?.get?.()
+      const nowSid = u?.sid ?? null
+
+      // Another session (tab switch, /new): its list is not ours — drop it at once.
+      if (nowSid !== sid) {
+        sid = nowSid
+        stopLinger()
+        shown = null
+        setTodos(null)
+      }
+
+      const raw = store.get?.()?.todos
+      const list = Array.isArray(raw) ? raw : []
+      // Live while the session works. After an interrupt Hermes does not archive the list, so an
+      // idle session with a list left over counts as finished (dim, then gone).
+      const live = list.length > 0 && (u ? !!u.busy : true)
+
+      if (live) {
+        stopLinger()
+
+        // Same array + same state → no re-render (the store fires on every streamed token).
+        if (list !== shown || !shownLive) {
+          shown = list
+          shownLive = true
+          setTodos({ items: list, live: true })
+        }
+
+        return
+      }
+
+      const last = list.length ? list : shown
+
+      if (last?.length && !linger && (shownLive || last !== shown)) {
+        shown = last
+        shownLive = false
+        setTodos({ items: last, live: false })
+        linger = setTimeout(() => {
+          linger = undefined
+          shown = null
+          setTodos(null)
+        }, PL_TODO_LINGER_MS)
+      }
+    }
+
+    try {
+      apply()
+    } catch {
+      return
+    }
+
+    const safe = () => {
+      try {
+        apply()
+      } catch {
+        // a malformed store value never breaks the bar
+      }
+    }
+
+    const offs = [store.listen(safe), ui?.listen?.(safe)]
+
+    return () => {
+      offs.forEach(off => off?.())
+      stopLinger()
+    }
+  }, [])
+
+  return todos
+}
+
+// ── tasks (subagents) ───────────────────────────────────────────────────
+// Delegated work in flight: in-turn subagents AND background (async) delegations
+// that outlive the turn — bridge.roster() merges both the way Hermes' live-agents
+// dock does. Count of in-flight ones + the goal of the first running one.
+interface PlTasks {
+  goal: string
+  /** true when bridge.roster() (in-turn + background) is the source; false = in-turn only. */
+  merged: boolean
+  n: number
+}
+
+type __PlSub = { goal?: string; status?: string }
+
+type __PlStore = { listen?: (cb: () => void) => () => void }
+
+const PL_TASK_IN_FLIGHT = new Set(['dispatched', 'finalizing', 'queued', 'running'])
+
+function usePlTasks(): null | PlTasks {
+  const [tasks, setTasks] = useState<null | PlTasks>(null)
+
+  useEffect(() => {
+    if (process.env.HERMES_POWERLINE_TODO === '0') {
+      return
+    }
+
+    const hy = (globalThis as { __hy?: { agents?: __PlStore; roster?: () => __PlSub[]; turn?: __PlStore; ui?: __PlStore } }).__hy
+
+    if (!hy?.turn?.listen) {
+      return
+    }
+
+    // Older bridge (no roster): in-turn subagents only.
+    const read = (): __PlSub[] =>
+      hy.roster ? hy.roster() : ((hy.turn as { get?: () => { subagents?: __PlSub[] } }).get?.()?.subagents ?? [])
+
+    let sig = ''
+
+    const apply = () => {
+      try {
+        const list = read()
+        const active = (Array.isArray(list) ? list : []).filter(s => PL_TASK_IN_FLIGHT.has(String(s?.status)))
+        const goal = String(active.find(s => s?.status === 'running')?.goal ?? active[0]?.goal ?? '')
+          .replace(/\s+/g, ' ')
+          .trim()
+        const next = `${active.length}\u0000${goal}`
+
+        // The turn store fires on every streamed token; re-render only on a real change.
+        if (next !== sig) {
+          sig = next
+          setTasks({ goal, merged: !!hy.roster, n: active.length })
+        }
+      } catch {
+        // a malformed store value never breaks the bar
+      }
+    }
+
+    apply()
+    // turn: in-turn subagents · agents: background snapshot · ui: switching session (tab)
+    const offs = [hy.turn.listen(apply), hy.agents?.listen?.(apply), hy.ui?.listen?.(apply)]
+
+    return () => offs.forEach(off => off?.())
+  }, [])
+
+  return tasks
+}
 
 function usePlInbox(): null | PlInbox {
   const [inbox, setInbox] = useState<null | PlInbox>(null)
@@ -715,6 +913,21 @@ function PlDuration({ bg, fg, icon, startedAt }: { bg: string; fg: string; icon:
   )
 }
 
+// Keep the head of `s` within `w` cells ("Add rate limit to…").
+function plTruncEnd(s: string, w: number): string {
+  if (stringWidth(s) <= w) {
+    return s
+  }
+
+  let chars = [...s]
+
+  while (chars.length && stringWidth(chars.join('')) > w - 1) {
+    chars = chars.slice(0, -1)
+  }
+
+  return `${chars.join('').trimEnd()}\u2026`
+}
+
 // Keep the tail of `s` within `w` cells ("…/long/path").
 function plTruncStart(s: string, w: number): string {
   if (stringWidth(s) <= w) {
@@ -747,6 +960,8 @@ function PowerlineRule(p: StatusRuleProps) {
   const { busy, cols, t, usage } = p
   const net = usePlNet()
   const inbox = usePlInbox()
+  const todos = usePlTodos()
+  const tasks = usePlTasks()
   const git = usePlGit()
   const quota = usePlQuota()
   const T = messages()
@@ -848,6 +1063,70 @@ function PowerlineRule(p: StatusRuleProps) {
     errShort = `${icon}${plErrText(e, true)}`
   }
 
+  // Todo progress and running tasks (subagents) — always on the bar (HERMES_POWERLINE_TODO=0 hides
+  // them). Todo: done/total and the step in progress; orange while working, green when every item is
+  // done, dimmed after the turn ends, a dim "—" when there is no list. Tasks: subagents running or
+  // queued and the first one's goal; dim "0 task" when idle. With the hy sidebar open (it lists
+  // items and goals) only the counts stay. Narrow terminals drop the text, then the idle cells.
+  const todoOn = process.env.HERMES_POWERLINE_TODO !== '0'
+  const shrink: { seg: PlSeg; short: string; idle: boolean }[] = []
+  // Text that rides on a pinned cell only when the row has room for it (claimed after the right
+  // block is reserved, before the metrics): the todo step, then the task goal.
+  const grow: { seg: PlSeg; text: string }[] = []
+
+  if (todoOn) {
+    const items = (todos?.items ?? []).filter(x => x.status !== 'cancelled')
+    const total = items.length
+    const done = items.filter(x => x.status === 'completed').length
+    const all = total > 0 && done === total
+    const live = !!todos?.live && total > 0
+    const cur = items.find(x => x.status === 'in_progress')?.content?.replace(/\s+/g, ' ').trim() ?? ''
+    const icon = PL_CONF.icons ? ic(all ? '\u{f0135}' : '\u{f0756}') : all ? '\u2713 ' : '\u2261 '
+    const count = total > 0 ? `${icon}${done}/${total}` : `${icon}\u2014`
+    const txt = count
+    const seg: PlSeg = {
+      bg: mid,
+      bold: live,
+      fg: !live ? dim : all ? '#50FA7B' : '#FFB86C',
+      key: 'todo',
+      muted: !live,
+      node: txt,
+      tone: live ? (all ? 'accent' : 'warn') : undefined,
+      w: stringWidth(txt)
+    }
+
+    pinned.push(seg)
+    shrink.push({ idle: total === 0, seg, short: count })
+
+    if (cur && live && !sideOpen) {
+      grow.push({ seg, text: cur })
+    }
+  }
+
+  if (todoOn && tasks) {
+    const n = tasks.n
+    const icon = PL_CONF.icons ? ic('\u{f000e}') : '\u00bb '
+    const count = `${icon}${n} ${n === 1 ? 'task' : 'tasks'}`
+    const txt = count
+    const seg: PlSeg = {
+      bg: mid,
+      bold: n > 0,
+      fg: n > 0 ? '#FFB86C' : dim,
+      key: 'tasks',
+      muted: n === 0,
+      node: txt,
+      tone: n > 0 ? 'warn' : undefined,
+      w: stringWidth(txt)
+    }
+
+    pinned.push(seg)
+    shrink.push({ idle: n === 0, seg, short: `${icon}${n}` })
+
+    if (n > 0 && tasks.goal && !sideOpen) {
+      grow.push({ seg, text: tasks.goal })
+    }
+  }
+
   // Inbox: work that needs the operator (orange, alarm-fixed) or only uncollected
   // delegation results (calm blue). Pinned so it is never budgeted away; hidden when clear.
   if (inbox) {
@@ -910,6 +1189,18 @@ function PowerlineRule(p: StatusRuleProps) {
       apiErr.node = errShort
       apiErr.w = stringWidth(errShort)
     }
+
+    for (const x of shrink) {
+      x.seg.node = x.short
+      x.seg.w = stringWidth(x.short)
+    }
+
+    // Still too wide: idle todo/task cells go first.
+    for (const x of shrink) {
+      if (x.idle && pinnedW() > width) {
+        pinned.splice(pinned.indexOf(x.seg), 1)
+      }
+    }
   }
 
   // Context is the first optional-ish thing: added only when it fits whole.
@@ -954,7 +1245,7 @@ function PowerlineRule(p: StatusRuleProps) {
 
   // Top-right block: folder › branch › clock, each its own grey step. It is
   // only as wide as its content, and never takes more than 45% of the row.
-  const rCells: { bg: string; bold?: boolean; fg: string; text: string }[] = []
+  const rCells: { bg: string; bold?: boolean; fg: string; text: string; trunc?: boolean }[] = []
 
   if (sharedW > 0 && !sideOpen) {
     const room = Math.max(0, Math.floor(width * 0.45) - durPart)
@@ -963,7 +1254,7 @@ function PowerlineRule(p: StatusRuleProps) {
       const bg = mono ? __plGray(6) : C.titleBg
 
       if (room - sepW >= 8) {
-        rCells.push({ bg, bold: true, fg: mono ? __plInk(bg) : dark, text: plTruncStart(` ${ic('\u{f0b79}')}${title} `, room - sepW) })
+        rCells.push({ bg, bold: true, fg: mono ? __plInk(bg) : dark, text: plTruncStart(` ${ic('\u{f0b79}')}${title} `, room - sepW), trunc: true })
       }
     } else {
       const br = cwd.branch ? ` ${ic('\u{f062c}')}${cwd.branch} ` : ''
@@ -974,7 +1265,7 @@ function PowerlineRule(p: StatusRuleProps) {
       if (pathRoom >= 6) {
         const pbg = mono ? __plGray(5) : C.cwdBg
 
-        rCells.push({ bg: pbg, fg: mono ? __plInk(pbg) : C.cwdFg, text: plTruncStart(` ${ic('\u{f0770}')}${cwd.path} `, pathRoom) })
+        rCells.push({ bg: pbg, fg: mono ? __plInk(pbg) : C.cwdFg, text: plTruncStart(` ${ic('\u{f0770}')}${cwd.path} `, pathRoom), trunc: true })
 
         if (keepBranch) {
           const bbg = mono ? __plGray(7) : C.mid
@@ -1012,6 +1303,33 @@ function PowerlineRule(p: StatusRuleProps) {
     rCells.push({ bg: C.mid, bold: bits.length > 0, fg: mono ? __plInk(C.mid) : C.branch, text: txt })
   }
 
+  // The left bar and this block must share one row. When they do not fit (a long busy face,
+  // the todo/task cells, a long title), give way in order: idle todo/task cells leave the bar,
+  // then the block's first cell (title or folder) is shortened, then dropped.
+  const blockWidth = () => (sharedW > 0 ? rCells.reduce((n, c) => n + stringWidth(c.text) + sepW, 0) + durPart : 0)
+  const overBy = () => pinnedW() + blockWidth() + 1 - width
+
+  for (const x of shrink) {
+    if (x.idle && overBy() > 0 && pinned.includes(x.seg)) {
+      pinned.splice(pinned.indexOf(x.seg), 1)
+    }
+  }
+
+  while (overBy() > 0 && rCells.length) {
+    const first = rCells[0]!
+    const keep = stringWidth(first.text) - overBy()
+
+    // Only the title / folder cell is shortened; quota and git cells are whole or gone.
+    if (first.trunc && keep >= 8) {
+      first.text = `${plTruncEnd(first.text.trimEnd(), keep - 1)} `
+    } else {
+      rCells.shift()
+    }
+  }
+
+  // Cells may have left the bar since the budget was taken: hand their room back.
+  budget = width - pinnedW()
+
   // Mono: the top-right block mirrors the left bar — darkest cell at the right
   // screen edge (the clock), lighter toward the middle.
   if (mono) {
@@ -1026,7 +1344,7 @@ function PowerlineRule(p: StatusRuleProps) {
     durFg = __plInk(durBg)
   }
 
-  const blockW = sharedW > 0 ? rCells.reduce((n, c) => n + stringWidth(c.text) + sepW, 0) + durPart : 0
+  const blockW = blockWidth()
 
   const sepR = (prev: string | undefined, bg: string) =>
     edge && __PL_LOOK.thin ? (
@@ -1081,6 +1399,24 @@ function PowerlineRule(p: StatusRuleProps) {
   // ── optional tail, evaluated in priority order ─────────────────────────
   const tail: PlSeg[] = []
   const add = (seg: PlSeg) => (fits(segW(seg.w)) ? (tail.push(seg), true) : false)
+
+  // Todo step / task goal: as much as the row has left, at most 28 cells each, at least 8 or nothing.
+  for (const g of grow) {
+    if (!pinned.includes(g.seg)) {
+      continue
+    }
+
+    const room = Math.min(28, budget - 3) // ' · ' joiner
+
+    if (room >= 8) {
+      const extra = ` \u00b7 ${plTruncEnd(g.text, room)}`
+      const w = stringWidth(extra)
+
+      g.seg.node = `${g.seg.node as string}${extra}`
+      g.seg.w += w
+      budget -= w
+    }
+  }
 
   // Hand leftover budget to the right segment (title / cwd).
   const growRight = () => {
@@ -1210,11 +1546,21 @@ function PowerlineRule(p: StatusRuleProps) {
 
   const subagents = typeof usage.active_subagents === 'number' ? usage.active_subagents : 0
 
-  if (subagents > 0 && ok('bg_subagents')) {
-    add({ bg: deep, fg: t.color.label, key: 'subagents', node: `${PL_LINK} ${subagents}`, w: stringWidth(`${PL_LINK} ${subagents}`) })
+  // Our task cell (pinned above) counts in-turn + background subagents when the bridge has the
+  // merged roster; without it (older bridge) the stock count stays, since it sees background work.
+  const ownTasks = todoOn && !!tasks?.merged
 
-    if (!busy) {
-      const hint = subagents === 1 ? T.status.resumesWhenSubagentFinishes : T.status.resumesWhenSubagentsFinish(subagents)
+  if (subagents > 0 && ok('bg_subagents')) {
+    if (!ownTasks) {
+      add({ bg: deep, fg: t.color.label, key: 'subagents', node: `${PL_LINK} ${subagents}`, w: stringWidth(`${PL_LINK} ${subagents}`) })
+    }
+
+    // Idle while delegated work runs: say the session resumes when it finishes — with the same
+    // count the task cell shows (Hermes' own figure also counts the delegation record).
+    const waiting = ownTasks ? tasks!.n : subagents
+
+    if (!busy && waiting > 0) {
+      const hint = waiting === 1 ? T.status.resumesWhenSubagentFinishes : T.status.resumesWhenSubagentsFinish(waiting)
 
       add({ bg: deep, fg: t.color.muted, key: 'resume', node: hint, w: stringWidth(hint) })
     }
@@ -1239,7 +1585,7 @@ function PowerlineRule(p: StatusRuleProps) {
       }
 
       seg.bg = __plLeftGray(i, left.length)
-      seg.fg = seg.tone ? __plTone(seg.tone, seg.bg) : __plInk(seg.bg)
+      seg.fg = seg.tone ? __plTone(seg.tone, seg.bg) : seg.muted ? (__plIsLight(seg.bg) ? '#4E4E4E' : '#B2B2B2') : __plInk(seg.bg)
 
       if (seg.render) {
         seg.node = seg.render(seg.bg)

@@ -10,6 +10,7 @@
 // ═══════════════════════════════════════════════════════════════════════
 import { HY as __hyTheme } from '../lib/prompt.js'
 import { $turnState as __hyTurnState } from './turnStore.js'
+import { $agentSnapshot as __hyAgentSnapshot, mergeAgentRoster as __hyMergeAgentRoster } from './agentRoster.js'
 
 ;(globalThis as { __hy?: unknown }).__hy = {
   get overlay() {
@@ -26,5 +27,17 @@ import { $turnState as __hyTurnState } from './turnStore.js'
   get ui() {
     return $uiState
   },
-  version: 2
+  /** Background-delegation snapshot store (listen to it together with `turn`). */
+  get agents() {
+    return __hyAgentSnapshot
+  },
+  /** Every subagent of this session — in-turn ones AND background (async) delegations that outlive
+   *  the turn — merged exactly like Hermes' live-agents dock does. */
+  roster: () => {
+    const snap = __hyAgentSnapshot.get()
+    const data = snap.sid === $uiState.get().sid ? snap.data : { delegations: [], subagents: [] }
+
+    return __hyMergeAgentRoster(__hyTurnState.get().subagents ?? [], data)
+  },
+  version: 3
 }
