@@ -4,10 +4,10 @@
 //   ◫ ( ⠼ 1 refactor rate limiter × ) ( ✓ 2 pentest notes × ) [+]        ⑂ ·coder ⠼reviewer ✓researcher
 //
 //   • every live Hermes session (the ^X switcher roster) is a pill; the current
-//     one is Dracula purple, working ones spin and glow, ? = waiting for you;
+//     one is jade green, working ones spin and glow, ? = waiting for you;
 //   • click a pill to switch, its × to close it, [+] for a new session
-//     (closing works for sessions this window owns — Hermes refuses others and
-//     says so in the transcript);
+//     (closing works for sessions this window owns — for others Hermes refuses
+//     and the × flashes a red ⊘ for 3 s);
 //   • right side: one chip per subagent route (~/.hermes/profiles/*): pulsing
 //     while a delegated task runs on it, ✓ once it has run this session,
 //     dim when unused — data shared with hy-sidebar (globalThis.__hyData).
@@ -25,7 +25,7 @@ const TAB_MAX = 22
 const FALLBACK = {
   comment: '#6272A4', cyan: '#8BE9FD', deep: '#21222C', deeper: '#191A21', dim: '#9AA5CE', fg: '#F8F8F2',
   green: '#50FA7B', line: '#44475A', orange: '#FFB86C', pink: '#FF79C6', purple: '#BD93F9', red: '#FF5555',
-  surface: '#343746', yellow: '#F1FA8C'
+  surface: '#343746', yellow: '#F1FA8C', accent: '#50FA7B'
 }
 
 const roster = () => (Array.isArray(globalThis.__hySessions) ? globalThis.__hySessions : null)
@@ -37,14 +37,26 @@ const call = (fn, ...args) => {
   try {
     const f = globalThis[fn]
 
-    if (typeof f === 'function') {
-      const r = f(...args)
-
-      r?.catch?.(() => {}) // Hermes reports refusals in the transcript itself
-    }
+    return typeof f === 'function' ? f(...args) : undefined
   } catch {
-    // best-effort UI action
+    return undefined // best-effort UI action
   }
+}
+
+// Tabs whose × was refused (a session another window owns): id → time, shown as ⊘ in red.
+const refused = new Map()
+
+const closeTab = id => {
+  const r = call('__hyCloseSession', id)
+
+  Promise.resolve(r)
+    .then(res => {
+      // closeLiveView answers null for a session this window holds nothing for.
+      if (!res || res.closed === false || res.ok === false) {
+        refused.set(id, Date.now())
+      }
+    })
+    .catch(() => refused.set(id, Date.now()))
 }
 
 export default function register(sdk) {
@@ -81,7 +93,9 @@ export default function register(sdk) {
         const routes = routeSig()
         const next = list.map(s => `${s.id}:${s.status}:${s.title ?? ''}:${s.current ? 1 : 0}`).join('|') + `#${globalThis.__hy?.ui?.get()?.sid}#${routes}`
 
-        if (next !== sig || list.some(busy) || routes.includes(':active')) {
+        const flashing = [...refused.values()].some(t => Date.now() - t < 3000)
+
+        if (next !== sig || flashing || list.some(busy) || routes.includes(':active')) {
           sig = next
           force(n => n + 1)
         }
@@ -146,7 +160,7 @@ export default function register(sdk) {
 
       used += w
 
-      const bg = isCur ? c.purple : c.surface
+      const bg = isCur ? c.accent : c.surface
       const fg = isCur ? c.deeper : c.fg
       const glyph = busy(s) ? spin : s.status === 'waiting' ? '?' : '●'
       const gColor = busy(s) ? (isCur ? c.deeper : c.orange) : s.status === 'waiting' ? (isCur ? c.deeper : c.yellow) : isCur ? c.deeper : c.green
@@ -173,8 +187,10 @@ export default function register(sdk) {
           ),
           h(
             Box,
-            { flexShrink: 0, onClick: () => call('__hyCloseSession', s.id) },
-            h(Text, { backgroundColor: bg, color: isCur ? c.deeper : c.comment }, '× ')
+            { flexShrink: 0, onClick: () => closeTab(s.id) },
+            now - (refused.get(s.id) ?? 0) < 3000
+              ? h(Text, { backgroundColor: c.red, bold: true, color: c.deeper }, '⊘ ')
+              : h(Text, { backgroundColor: bg, color: isCur ? c.deeper : c.comment }, '× ')
           ),
           h(Text, { color: bg }, '\u{e0b4}'),
           h(Text, null, ' ')
@@ -187,7 +203,7 @@ export default function register(sdk) {
     return h(
       Box,
       { flexDirection: 'row', flexShrink: 0, width: Math.max(20, cols - 4) },
-      h(Text, { color: c.purple }, '\u{f04e9} '),
+      h(Text, { color: c.accent }, '\u{f04e9} '),
       ...tabs,
       hidden > 0 ? h(Text, { color: c.dim }, `+${hidden} `) : null,
       h(
@@ -196,7 +212,7 @@ export default function register(sdk) {
         h(Text, null, h(Text, { color: c.line }, '\u{e0b6}'), h(Text, { backgroundColor: c.line, bold: true, color: c.green }, '+'), h(Text, { color: c.line }, '\u{e0b4}'))
       ),
       h(Box, { flexGrow: 1 }),
-      showRoutes ? h(Text, { color: c.purple }, '\u{f000e} ') : h(Text, { color: c.comment }, '^X switch'),
+      showRoutes ? h(Text, { color: c.accent }, '\u{f000e} ') : h(Text, { color: c.comment }, '^X switch'),
       ...(showRoutes ? routeNodes : [])
     )
   }

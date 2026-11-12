@@ -3,14 +3,14 @@
 # Install: ~/.hermes/dashboard-themes/hy-dracula.yaml, then `hermes config set dashboard.theme hy-dracula`.
 name: hy-dracula
 label: hy Dracula
-description: Dracula spec palette — matches the hy powerline TUI
+description: Dracula canvas with a jade-green accent — matches the hy powerline TUI
 palette:
   background: '#282A36'
   midground: '#F8F8F2'
   foreground:
-    hex: '#BD93F9'
+    hex: '#50FA7B'
     alpha: 0
-  warmGlow: 'rgba(189, 147, 249, 0.18)'
+  warmGlow: 'rgba(80, 250, 123, 0.14)'
   noiseOpacity: 0.35
 typography:
   fontSans: 'Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif'
@@ -26,13 +26,13 @@ colorOverrides:
   cardForeground: '#F8F8F2'
   popover: '#21222C'
   popoverForeground: '#F8F8F2'
-  primary: '#BD93F9'
+  primary: '#50FA7B'
   primaryForeground: '#191A21'
   secondary: '#44475A'
   secondaryForeground: '#F8F8F2'
   muted: '#343746'
   mutedForeground: '#9AA5CE'
-  accent: '#FF79C6'
+  accent: '#8BE9FD'
   accentForeground: '#191A21'
   destructive: '#FF5555'
   destructiveForeground: '#191A21'
@@ -40,7 +40,7 @@ colorOverrides:
   warning: '#FFB86C'
   border: '#44475A'
   input: '#343746'
-  ring: '#BD93F9'
+  ring: '#50FA7B'
 componentStyles:
   sidebar:
     background: '#21222C'
@@ -49,10 +49,10 @@ componentStyles:
     background: '#191A21'
     borderColor: '#44475A'
   tab:
-    activeBackground: '#BD93F9'
+    activeBackground: '#50FA7B'
     activeColor: '#191A21'
   progress:
-    fill: '#BD93F9'
+    fill: '#50FA7B'
   badge:
     background: '#44475A'
     color: '#50FA7B'

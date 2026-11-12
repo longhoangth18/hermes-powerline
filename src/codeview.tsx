@@ -61,7 +61,7 @@ interface PlCvPal {
 // Hermes runs at 256 colours (tmux / Apple Terminal), where a tinted dark would
 // round to a washed-out cube grey. Accent hexes round to close neighbours.
 const PL_CV_DARK: PlCvPal = {
-  accent: __cvHY.purple, // language chip
+  accent: __cvHY.accent, // language chip (green)
   addBg: __cvHY.truecolor ? '#1A3A1A' : '#0B3B14', // OpenCode Dracula · 256: → 22
   addFg: __cvHY.green,
   addGut: __cvHY.truecolor ? '#224A22' : '#0B3B14',
@@ -1422,19 +1422,19 @@ const __plMd = (t: Theme) =>
   plMdDark(t)
     ? {
         bold: __cvHY.orange,
-        bullets: [__cvHY.cyan, __cvHY.purple, __cvHY.pink],
+        bullets: [__cvHY.accent, __cvHY.cyan, __cvHY.pink],
         code: __cvHY.green,
         codeBg: __cvHY.line,
-        h1: __cvHY.purple,
-        h2: __cvHY.purple,
-        h3: __cvHY.purple,
+        h1: __cvHY.accent,
+        h2: __cvHY.accent,
+        h3: __cvHY.cyan,
         h4: __cvHY.pink,
         italic: __cvHY.yellow,
-        num: __cvHY.purple,
-        quote: __cvHY.purple,
+        num: __cvHY.accent,
+        quote: __cvHY.accent,
         quoteText: __cvHY.yellow,
         rule: __cvHY.comment,
-        ruleMark: __cvHY.purple,
+        ruleMark: __cvHY.accent,
         done: __cvHY.green,
         todo: __cvHY.dim,
         ink: __cvHY.deeper
@@ -1664,7 +1664,7 @@ function __plNoticeCardImpl(text: string, t: Theme, cols: number): null | ReactN
 
   const ok = tasks.length ? tasks.every(x => x.ok) : !/ERROR|FAILED|✗/.test(text)
   const edge = ok ? __cvHY.green : __cvHY.red
-  const title = /DELEGATION/.test(kind) ? `⑂ SUBAGENT ${ok ? 'XONG' : 'LỖI'}` : `◈ ${kind}`
+  const title = /DELEGATION/.test(kind) ? `⑂ SUBAGENT ${ok ? 'DONE' : 'FAILED'}` : `◈ ${kind}`
 
   return (
     <Box flexDirection="column" marginY={0}>
@@ -1716,6 +1716,9 @@ function __plNoticeCardImpl(text: string, t: Theme, cols: number): null | ReactN
     </Box>
   )
 }
+
+// Final answers coloured with ANSI by a plugin still render as markdown (messageLine insert).
+;(globalThis as { __plAnsiMd?: boolean }).__plAnsiMd = PL_CV_ON
 
 ;(globalThis as { __plNoticeCard?: unknown }).__plNoticeCard = (text: string, t: Theme, cols: number) => {
   try {

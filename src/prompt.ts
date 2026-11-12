@@ -165,7 +165,9 @@ export const HY = {
   pink: T24 ? '#FF79C6' : '#FF87D7', //                        | 212
   purple: T24 ? '#BD93F9' : '#AF87FF', //                      | 141
   red: T24 ? '#FF5555' : '#FF5F5F', //                         | 203
-  yellow: T24 ? '#F1FA8C' : '#FFFF87' //                       | 228
+  yellow: T24 ? '#F1FA8C' : '#FFFF87', //                      | 228
+  /** The hy accent: Dracula green (the user's colour), not Dracula's usual purple. */
+  accent: T24 ? '#50FA7B' : '#5FFF87'
 }
 
 // Powerline ramp, dark → light. Truecolor: Dracula canvas tones up to Comment

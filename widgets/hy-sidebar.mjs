@@ -2,7 +2,7 @@
 //
 // An official Hermes user widget ($HERMES_HOME/tui-widgets/), ambient, right rail,
 // auto-open on terminals ≥ 112 columns, /hy-sidebar toggles. Layout follows the
-// OpenCode / Crush sidebars (research notes in docs/HUONG-DAN.md):
+// OpenCode / Crush sidebars (design notes in docs/GUIDE.md):
 //
 //   title · model · context gauge (tokens · % · cost)
 //   SUBAGENTS  route chips lit while active · live tasks · finished tasks
@@ -35,7 +35,7 @@ const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '�
 const FALLBACK = {
   bg: '#282A36', comment: '#6272A4', cyan: '#8BE9FD', deep: '#21222C', deeper: '#191A21', dim: '#9AA5CE',
   fg: '#F8F8F2', green: '#50FA7B', line: '#44475A', orange: '#FFB86C', pink: '#FF79C6', purple: '#BD93F9',
-  raised: '#4D5066', red: '#FF5555', surface: '#343746', truecolor: true, yellow: '#F1FA8C'
+  raised: '#4D5066', red: '#FF5555', surface: '#343746', truecolor: true, yellow: '#F1FA8C', accent: '#50FA7B'
 }
 
 const IC = {
@@ -455,7 +455,7 @@ export default function register(sdk) {
     return h(
       Text,
       { wrap: 'truncate-end' },
-      h(Text, { bold: true, color: c.purple }, label),
+      h(Text, { bold: true, color: c.accent }, label),
       h(Text, { color: c.line }, '─'.repeat(fill)),
       r ? h(Text, { bold: true, color: rightColor ?? c.dim }, r) : null
     )
@@ -603,7 +603,7 @@ export default function register(sdk) {
     // ── title block ──
     const title = ui.sessionTitle || info.title || 'new session'
     const pct = usage.context_percent ?? (usage.context_used && usage.context_max ? (usage.context_used / usage.context_max) * 100 : null)
-    const end = pct >= 85 ? c.red : pct >= 60 ? c.orange : c.pink
+    const end = pct >= 85 ? c.red : pct >= 60 ? c.orange : c.cyan
     const status = ui.busy
       ? h(Text, null, h(Text, { color: c.orange }, `${spin} `), h(Glow, { base: c.orange, bold: true, glow: c.yellow, now, text: 'working' }))
       : h(Text, { color: c.green }, '● idle')
@@ -621,7 +621,7 @@ export default function register(sdk) {
         h(
           Text,
           { wrap: 'truncate-end' },
-          h(Text, { backgroundColor: c.purple, bold: true, color: c.deeper }, ' ☤ hermes '),
+          h(Text, { backgroundColor: c.accent, bold: true, color: c.deeper }, ' ☤ hermes '),
           h(Text, { backgroundColor: c.line, color: c.fg }, ` ${fit(info.profile_name || 'default', 12)} `),
           h(Text, { color: c.line }, '\u{e0b0} '),
           status
@@ -637,7 +637,7 @@ export default function register(sdk) {
         h(
           Text,
           { wrap: 'truncate-end' },
-          h(Bar, { c0: c.purple, c1: end, pct, track: c.surface, width: W - 17 }),
+          h(Bar, { c0: c.accent, c1: end, pct, track: c.surface, width: W - 17 }),
           h(Text, { bold: true, color: end }, ` ${pct == null ? '–' : pct < 10 ? pct.toFixed(1) : Math.round(pct)}%`),
           h(Text, { color: c.dim }, ` ${short(usage.context_used)}/${short(usage.context_max)}`)
         ),
@@ -663,7 +663,7 @@ export default function register(sdk) {
           Text,
           { key: 'tb', wrap: 'truncate-end' },
           h(Text, null, ' '),
-          h(Bar, { c0: c.purple, c1: c.green, pct: (done / todos.length) * 100, track: c.surface, width: W - 9 }),
+          h(Bar, { c0: c.cyan, c1: c.accent, pct: (done / todos.length) * 100, track: c.surface, width: W - 9 }),
           h(Text, { bold: true, color: done === todos.length ? c.green : c.orange }, ` ${Math.round((done / todos.length) * 100)}%`)
         )
       ]
@@ -710,7 +710,7 @@ export default function register(sdk) {
       }
 
       if (todos.length > shown.length) {
-        body.push(h(Text, { color: c.comment, key: 'tm' }, ` …và ${todos.length - shown.length} việc nữa`))
+        body.push(h(Text, { color: c.comment, key: 'tm' }, ` …and ${todos.length - shown.length} more`))
       }
 
       section(
@@ -718,7 +718,7 @@ export default function register(sdk) {
         h(Head, {
           c,
           icon: IC.todo,
-          right: `${todoStale ? 'lượt trước · ' : ''}${done}/${todos.length}`,
+          right: `${todoStale ? 'last turn · ' : ''}${done}/${todos.length}`,
           rightColor: done === todos.length ? c.green : todoStale ? c.dim : c.orange,
           title: 'TODO'
         }),
@@ -796,7 +796,7 @@ export default function register(sdk) {
 
       section(
         'subs',
-        h(Head, { c, icon: IC.team, right: activeN ? `${activeN} đang chạy` : kids.length ? `${kids.length} xong` : 'chưa dùng', rightColor: activeN ? c.orange : c.dim, title: 'SUBAGENTS' }),
+        h(Head, { c, icon: IC.team, right: activeN ? `${activeN} running` : kids.length ? `${kids.length} done` : 'unused', rightColor: activeN ? c.orange : c.dim, title: 'SUBAGENTS' }),
         body
       )
     }
@@ -835,7 +835,7 @@ export default function register(sdk) {
       const lazy = m.status === 'lazy' || m.status === 'configured'
       const inUse = mcpLive.has(name)
       const u = mcpUse.get(name)
-      const word = inUse ? 'đang gọi' : up ? 'online' : lazy ? 'chờ' : m.status === 'connecting' ? 'kết nối' : m.status === 'disabled' ? 'tắt' : 'lỗi'
+      const word = inUse ? 'calling' : up ? 'online' : lazy ? 'standby' : m.status === 'connecting' ? 'connecting' : m.status === 'disabled' ? 'off' : 'error'
       const dot = inUse ? c.orange : up ? c.green : lazy ? c.dim : m.status === 'connecting' ? c.yellow : m.status === 'disabled' ? c.comment : c.red
 
       return h(Row, {
@@ -959,7 +959,7 @@ export default function register(sdk) {
 
     section(
       'skills',
-      h(Head, { c, icon: IC.puzzle, right: `${usedN} dùng · ${catalog.length || '–'}`, rightColor: liveKeys.size ? c.orange : usedN ? c.green : c.dim, title: 'SKILLS' }),
+      h(Head, { c, icon: IC.puzzle, right: `${usedN} used · ${catalog.length || '–'}`, rightColor: liveKeys.size ? c.orange : usedN ? c.green : c.dim, title: 'SKILLS' }),
       skillBody
     )
 
@@ -972,7 +972,7 @@ export default function register(sdk) {
       h(Head, {
         c,
         icon: IC.mcp,
-        right: mcpLive.size ? `${mcpLive.size} đang gọi` : `${upN}/${servers.length}${callsN ? ` · ${callsN} lần` : ''}`,
+        right: mcpLive.size ? `${mcpLive.size} calling` : `${upN}/${servers.length}${callsN ? ` · ${callsN} calls` : ''}`,
         rightColor: mcpLive.size ? c.orange : upN === servers.length ? c.green : c.yellow,
         title: 'MCP'
       }),
@@ -1012,10 +1012,10 @@ export default function register(sdk) {
               Text,
               { color: c.dim, wrap: 'truncate-end' },
               `${IC.folder} ${tail(info.cwd, W - (info.branch ? 18 : 4))}`,
-              info.branch ? h(Text, { color: c.purple }, `  ${IC.branch} ${fit(info.branch, 12)}`) : null
+              info.branch ? h(Text, { color: c.accent }, `  ${IC.branch} ${fit(info.branch, 12)}`) : null
             )
           : null,
-        h(Text, { color: c.comment }, '/hy-sidebar · ^X phiên · /hy-tabs')
+        h(Text, { color: c.comment }, '/hy-sidebar · ^X sessions · /hy-tabs')
       )
     )
 

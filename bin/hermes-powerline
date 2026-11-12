@@ -175,6 +175,21 @@ INSERTS = {
     ],
     # System notices injected as user messages (async delegation results …) → card (optional).
     "components/messageLine.tsx": [
+        # A plugin (e.g. hermes-axioma's transform_llm_output) can colour the FINAL answer with ANSI;
+        # stock Hermes then renders it raw (<Ansi>), so a reply that streamed as markdown turns into
+        # raw markdown when it completes. Strip the escapes and keep rendering it as markdown.
+        ("    if (msg.role !== 'user' && hasAnsi(msg.text)) {\n",
+         "    if (msg.role === 'assistant' && hasAnsi(msg.text) && (globalThis as { __plAnsiMd?: boolean }).__plAnsiMd) {\n"
+         "      return (\n"
+         "        <Md\n"
+         "          cols={transcriptBodyWidth(cols, msg.role, t.brand.prompt, TERMUX_TUI_MODE)}\n"
+         "          compact={compact}\n"
+         "          t={t}\n"
+         "          text={msg.text.replace(/\\x1b\\[[0-9;:?]*[ -\\/]*[@-~]/g, '').replace(/\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)/g, '')}\n"
+         "        />\n"
+         "      )\n"
+         "    }\n\n"
+         "    if (msg.role !== 'user' && hasAnsi(msg.text)) {\n"),
         ("    if (msg.role === 'user') {\n      const segments = splitComposerHighlights(msg.text)\n",
          "    const __plCard =\n"
          "      msg.role === 'user'\n"
