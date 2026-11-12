@@ -40,6 +40,9 @@ jobs:
       - name: Shell syntax
         run: bash -n bin/hermes-powerline && bash -n install.sh && bash -n uninstall.sh
 
+      - name: Widget syntax
+        run: for f in widgets/*.mjs; do node --check "$f"; done
+
       - name: Inject, typecheck, build
         env:
           HERMES_AGENT_DIR: ${{ runner.temp }}/hermes-agent

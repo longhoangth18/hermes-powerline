@@ -5,6 +5,7 @@
 // `hermes update` never touches it). Appended to components/appChrome.tsx so it
 // can reuse that module's private helpers (FaceTicker, SessionDuration, …).
 // ═══════════════════════════════════════════════════════════════════════
+import { execFile as __plExecFile } from 'node:child_process'
 import { readFileSync as __plReadFileSync, statSync as __plStatSync } from 'node:fs'
 import { Component as __PlComponent } from 'react'
 import { $uiState as __plUiState } from '../app/uiStore.js'
@@ -16,6 +17,7 @@ import {
   plGray as __plGray,
   plInk as __plInk,
   plIsLight as __plIsLight,
+  plEdgeGray as __plEdgeGray,
   plLeftGray as __plLeftGray,
   plRightWidth as __plRightWidth,
   plTone as __plTone,
@@ -27,6 +29,8 @@ type PlStyle = 'arrow' | 'flame' | 'round' | 'slant'
 interface PlConf {
   enabled: boolean
   icons: boolean
+  /** Poll `hermes inbox --json` and pin a badge when something needs attention. */
+  inbox: boolean
   palette: 'dracula' | 'mono' | 'skin'
   style: PlStyle
 }
@@ -39,7 +43,7 @@ const PL_SEPS: Record<PlStyle, { capL: string; capR: string; l: string; lt: stri
 }
 
 function plLoadConf(): PlConf {
-  const conf: PlConf = { enabled: true, icons: true, palette: 'mono', style: 'arrow' }
+  const conf: PlConf = { enabled: true, icons: true, inbox: true, palette: 'mono', style: 'arrow' }
 
   try {
     // The launcher passes the path explicitly: `hermes -p <profile>` rewrites
@@ -54,6 +58,10 @@ function plLoadConf(): PlConf {
 
     if (typeof raw.icons === 'boolean') {
       conf.icons = raw.icons
+    }
+
+    if (typeof raw.inbox === 'boolean') {
+      conf.inbox = raw.inbox
     }
 
     if (raw.palette === 'skin' || raw.palette === 'dracula' || raw.palette === 'mono') {
@@ -234,6 +242,91 @@ function usePlNet(): null | PlNet {
   }, [isOccluded])
 
   return net
+}
+
+// ── inbox badge (fed by the `inbox` Hermes plugin's read-only CLI) ──
+// `hermes inbox --json` lists what needs the operator: stalled/dropped delegations, failed
+// cron runs, orphaned background processes, blocked kanban tasks, plus finished delegation
+// results nobody collected. ~1 s of CPU per run, so it is polled once a minute, async, and
+// never blocks a render. Any failure (plugin missing, CLI error, bad JSON) keeps the bar as is.
+interface PlInbox {
+  attention: number
+  kinds: string
+  undelivered: number
+}
+
+const PL_INBOX_MS = 60_000
+const PL_INBOX_KIND: Record<string, string> = { cron: 'cron', delegation: 'deleg', kanban: 'kanban', process: 'proc' }
+
+function usePlInbox(): null | PlInbox {
+  const [inbox, setInbox] = useState<null | PlInbox>(null)
+  const last = useRef('')
+
+  useEffect(() => {
+    if (!PL_CONF.inbox) {
+      return
+    }
+
+    let alive = true
+    let running = false
+
+    const run = () => {
+      if (running) {
+        return
+      }
+
+      running = true
+      __plExecFile(
+        process.env.HERMES_POWERLINE_HERMES_BIN?.trim() || 'hermes',
+        ['inbox', '--json'],
+        { env: { ...process.env, NO_COLOR: '1' }, maxBuffer: 4 << 20, timeout: 30_000 },
+        (err, stdout) => {
+          running = false
+
+          if (!alive || err) {
+            return
+          }
+
+          try {
+            const j = JSON.parse(String(stdout)) as { attention?: { kind?: string }[]; finished_undelivered?: unknown[] }
+            const att = Array.isArray(j.attention) ? j.attention : []
+            const counts = new Map<string, number>()
+
+            for (const a of att) {
+              const k = PL_INBOX_KIND[String(a?.kind)] ?? String(a?.kind ?? '?')
+              counts.set(k, (counts.get(k) ?? 0) + 1)
+            }
+
+            const next: PlInbox = {
+              attention: att.length,
+              kinds: [...counts].map(([k, n]) => `${n} ${k}`).join('·'),
+              undelivered: Array.isArray(j.finished_undelivered) ? j.finished_undelivered.length : 0
+            }
+
+            const key = JSON.stringify(next)
+
+            if (key !== last.current) {
+              last.current = key
+              setInbox(next.attention || next.undelivered ? next : null)
+            }
+          } catch {
+            // unparsable output: keep the previous badge
+          }
+        }
+      )
+    }
+
+    const first = setTimeout(run, 5_000)
+    const id = setInterval(run, PL_INBOX_MS)
+
+    return () => {
+      alive = false
+      clearTimeout(first)
+      clearInterval(id)
+    }
+  }, [])
+
+  return inbox
 }
 
 const PL_ERR_SHORT: Record<string, string> = {
@@ -477,6 +570,7 @@ function plTruncStart(s: string, w: number): string {
 function PowerlineRule(p: StatusRuleProps) {
   const { busy, cols, t, usage } = p
   const net = usePlNet()
+  const inbox = usePlInbox()
   const T = messages()
   const sep = PL_SEPS[PL_CONF.style] ?? PL_SEPS.arrow
   // Icon + gap (2 cells by default, so full-size Nerd Font glyphs have room).
@@ -571,6 +665,18 @@ function PowerlineRule(p: StatusRuleProps) {
     errShort = `${icon}${plErrText(e, true)}`
   }
 
+  // Inbox: work that needs the operator (orange, alarm-fixed) or only uncollected
+  // delegation results (calm blue). Pinned so it is never budgeted away; hidden when clear.
+  if (inbox) {
+    const attn = inbox.attention > 0
+    const icon = PL_CONF.icons ? ic(attn ? '\u{f1295}' : '\u{f02fb}') : attn ? '! ' : '> '
+    const txt = attn
+      ? `${icon}${inbox.kinds}${inbox.undelivered ? `·${inbox.undelivered} result` : ''}`
+      : `${icon}${inbox.undelivered} result`
+
+    pinned.push({ bg: attn ? '#FF8700' : '#5F87D7', bold: attn, fg: dark, fixed: true, key: 'inbox', node: txt, w: stringWidth(txt) })
+  }
+
   if (DEV_CREDITS_MODE) {
     pinned.push({ bg: C.warn, fg: dark, key: 'devmode', node: T.status.devCredits, w: stringWidth(T.status.devCredits) })
   }
@@ -651,8 +757,8 @@ function PowerlineRule(p: StatusRuleProps) {
   const rightBg = mono ? __plGray(6) : title ? C.titleBg : C.cwdBg
   const rightFg = mono ? __plInk(rightBg) : title ? dark : C.cwdFg
   const branchFg = mono ? rightFg : C.branch
-  const durBg = mono ? __plGray(9) : C.durBg
-  const durFg = mono ? __plInk(durBg) : PL_CONF.palette !== 'skin' ? dark : light
+  let durBg = mono ? __plGray(9) : C.durBg
+  let durFg = mono ? __plInk(durBg) : PL_CONF.palette !== 'skin' ? dark : light
   let budget = width - pinnedW()
   // Balanced layout: the prompt row below ends in a CPU/GPU/RAM/temp block of
   // exactly this width; ours (folder · branch · clock) mirrors it.
@@ -696,10 +802,31 @@ function PowerlineRule(p: StatusRuleProps) {
     }
   }
 
+  // Mono: the top-right block mirrors the left bar — darkest cell at the right
+  // screen edge (the clock), lighter toward the middle.
+  if (mono) {
+    const m = rCells.length + (durOn ? 1 : 0)
+
+    rCells.forEach((c, j) => {
+      c.bg = __plEdgeGray(m - 1 - j, m)
+      c.fg = __plInk(c.bg)
+    })
+    durBg = __plEdgeGray(0, m)
+    durFg = __plInk(durBg)
+  }
+
   const blockW = sharedW > 0 ? rCells.reduce((n, c) => n + stringWidth(c.text) + sepW, 0) + durPart : 0
 
   const sepR = (prev: string | undefined, bg: string) =>
-    edge ? (
+    edge && __PL_LOOK.thin ? (
+      prev ? (
+        <Text backgroundColor={prev} color={edge}>
+          {__PL_LOOK.thinOf(sep.r)}
+        </Text>
+      ) : (
+        <Text color={bg}>{sep.r}</Text>
+      )
+    ) : edge ? (
       <>
         <Text backgroundColor={prev} color={edge}>
           {sep.r}
@@ -923,7 +1050,15 @@ function PowerlineRule(p: StatusRuleProps) {
     // With an edge colour the separator is a 2-cell band: the segment's arrow
     // on the edge colour, then the edge's arrow on the next segment — a ">"
     // outline between the two greys.
-    const arrow = edge ? (
+    const arrow = edge && __PL_LOOK.thin ? (
+      next ? (
+        <Text backgroundColor={next.bg} color={edge}>
+          {__PL_LOOK.thinOf(sep.l)}
+        </Text>
+      ) : (
+        <Text color={seg.bg}>{sep.capR || sep.l}</Text>
+      )
+    ) : edge ? (
       <>
         <Text backgroundColor={edge} color={seg.bg}>
           {sep.l}

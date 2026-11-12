@@ -40,6 +40,8 @@ interface PlpConf {
   bigIcons: boolean
   cap: PlpCap
   edge: null | string
+  /** true: the edge is ONE thin chevron cell; false: the 2-cell bold band. */
+  edgeThin: boolean
   on: boolean
   palette: PlPaletteName
   sys: boolean
@@ -47,7 +49,7 @@ interface PlpConf {
 }
 
 function plpConf(): PlpConf {
-  const conf: PlpConf = { bigIcons: true, cap: 'slant', edge: null, on: true, palette: 'mono', sys: true, twoLine: true }
+  const conf: PlpConf = { bigIcons: true, cap: 'slant', edge: null, edgeThin: true, on: true, palette: 'mono', sys: true, twoLine: true }
   let edgeRaw: unknown
 
   if (process.env.HERMES_POWERLINE === '0' || process.env.HERMES_POWERLINE_PROMPT === '0') {
@@ -61,6 +63,7 @@ function plpConf(): PlpConf {
       bigIcons?: unknown
       cap?: unknown
       edge?: unknown
+      edgeThin?: unknown
       enabled?: unknown
       palette?: unknown
       prompt?: unknown
@@ -93,6 +96,10 @@ function plpConf(): PlpConf {
     }
 
     edgeRaw = raw.edge
+
+    if (typeof raw.edgeThin === 'boolean') {
+      conf.edgeThin = raw.edgeThin
+    }
   } catch {
     // defaults
   }
@@ -114,7 +121,7 @@ const PLP_CONF = plpConf()
 // Neutral grey ramp, dark → light. Every colour is an exact xterm-256 value, so
 // it looks the same with or without truecolor (tmux, SSH clients). It stops at
 // a mid grey so plain white text stays readable on every step. The separators
-// are a 2-cell band in the edge colour, which reads as a green ">" outline.
+// are one thin chevron in the edge colour (or, with edgeThin: false, the 2-cell bold band).
 export const PL_GRAYS = [
   '#1C1C1C',
   '#262626',
@@ -155,11 +162,28 @@ export const PL_LOOK = {
   mono: PLP_CONF.palette === 'mono',
   palette: PLP_CONF.palette,
   /** Cells one separator takes. */
-  sepW: PLP_CONF.edge ? 2 : 1
+  sepW: PLP_CONF.edge && !PLP_CONF.edgeThin ? 2 : 1,
+  /** Edge drawn as one thin chevron (default) instead of the 2-cell band. */
+  thin: !!PLP_CONF.edge && PLP_CONF.edgeThin,
+  /** The thin (outline) variant of a solid powerline glyph: Nerd Font keeps it at codepoint + 1. */
+  thinOf: (ch: string) => {
+    const cp = ch.codePointAt(0) ?? 0
+
+    return cp >= 0xe0b0 && cp <= 0xe0c3 && cp % 2 === 0 ? String.fromCodePoint(cp + 1) : ch
+  }
 }
 
+/**
+ * Grey for a cell `d` steps in from its bar's OUTER edge (0 = the cell touching
+ * the screen edge) in a bar of `n` cells: every bar runs dark at the edge →
+ * lighter toward the middle, mirrored left/right. #262626 at the edge (one step
+ * off the canvas, so it still reads as a cell) up to #767676, where white text
+ * still keeps its contrast.
+ */
+export const plEdgeGray = (d: number, n: number) => plGray(Math.min(9, 1 + d * (n <= 4 ? 2.5 : 8 / Math.max(1, n - 1))))
+
 /** Steps along the grey ramp for the i-th of n left-hand segments. */
-export const plLeftGray = (i: number, n: number) => plGray(n <= 4 ? i * 2 : (i * 6) / Math.max(1, n - 1))
+export const plLeftGray = (i: number, n: number) => plEdgeGray(i, n)
 
 export const PLP_CAP_L = PLP_CAPS[PLP_CONF.cap]
 /** Show CPU / GPU / RAM / temperature on the right of the two-line prompt row. */

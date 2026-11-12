@@ -1,0 +1,58 @@
+# hy Jade — the hermes-powerline look for the Hermes web dashboard (and its web chat).
+# Same palette as the TUI skin skins/hy-jade.yaml: neutral graphite + jade green.
+# Install: ~/.hermes/dashboard-themes/hy-jade.yaml, then `hermes config set dashboard.theme hy-jade`.
+name: hy-jade
+label: hy Jade
+description: Graphite and jade green — matches the hy powerline TUI
+palette:
+  background: '#1C1C1C'
+  midground: '#E4E4E4'
+  foreground:
+    hex: '#5FD75F'
+    alpha: 0
+  warmGlow: 'rgba(95, 215, 95, 0.16)'
+  noiseOpacity: 0.35
+typography:
+  fontSans: 'Inter, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif'
+  # Nerd Font first so the embedded TUI (web chat) draws the powerline glyphs and icons.
+  fontMono: '"JetBrainsMono Nerd Font Mono", "JetBrainsMono Nerd Font", "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace'
+  baseSize: 15px
+  lineHeight: '1.55'
+layout:
+  radius: 0.6rem
+  density: comfortable
+colorOverrides:
+  card: '#262626'
+  cardForeground: '#E4E4E4'
+  popover: '#262626'
+  popoverForeground: '#E4E4E4'
+  primary: '#5FD75F'
+  primaryForeground: '#1C1C1C'
+  secondary: '#3A3A3A'
+  secondaryForeground: '#E4E4E4'
+  muted: '#303030'
+  mutedForeground: '#8A8A8A'
+  accent: '#87D7AF'
+  accentForeground: '#1C1C1C'
+  destructive: '#FF5F5F'
+  destructiveForeground: '#1C1C1C'
+  success: '#5FD75F'
+  warning: '#FFAF5F'
+  border: '#3A3A3A'
+  input: '#303030'
+  ring: '#5FD75F'
+componentStyles:
+  sidebar:
+    background: '#202020'
+    borderColor: '#303030'
+  header:
+    background: '#202020'
+    borderColor: '#303030'
+  tab:
+    activeBackground: '#5FD75F'
+    activeColor: '#1C1C1C'
+  progress:
+    fill: '#5FD75F'
+  badge:
+    background: '#303030'
+    color: '#87FFAF'

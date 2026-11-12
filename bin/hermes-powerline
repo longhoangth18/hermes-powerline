@@ -54,7 +54,7 @@ Environment:
   HERMES_HOME                  Hermes home (default ~/.hermes)
   HERMES_AGENT_DIR             Hermes checkout (default $HERMES_HOME/hermes-agent)
   HERMES_POWERLINE_DIR         build + config dir (default $HERMES_HOME/powerline)
-  HERMES_POWERLINE_SRC         where powerline.tsx / prompt.ts / promptPrefix.tsx live
+  HERMES_POWERLINE_SRC         where powerline.tsx / prompt.ts / promptPrefix.tsx / codeview.tsx live
 EOF
 }
 
@@ -70,7 +70,7 @@ compute_stamp() {
     git -C "$REPO" rev-parse HEAD 2>/dev/null || echo nogit
     git -C "$REPO" status --porcelain -- "${INPUTS[@]}" 2>/dev/null
     git -C "$REPO" diff -- "${INPUTS[@]}" 2>/dev/null | sha
-    cat "$SRC" "$SRC_DIR/prompt.ts" "$SRC_DIR/promptPrefix.tsx" "$SELF" 2>/dev/null | sha
+    cat "$SRC" "$SRC_DIR/prompt.ts" "$SRC_DIR/promptPrefix.tsx" "$SRC_DIR/codeview.tsx" "$SRC_DIR/bridge.ts" "$SELF" 2>/dev/null | sha
     node --version 2>/dev/null
     # Dependency state: right after `hermes update` Hermes may still be
     # installing node deps; once that lands the stamp changes → retry.
@@ -82,7 +82,7 @@ compute_stamp() {
 
 check_sources() {
   local f
-  for f in "$SRC" "$SRC_DIR/prompt.ts" "$SRC_DIR/promptPrefix.tsx"; do
+  for f in "$SRC" "$SRC_DIR/prompt.ts" "$SRC_DIR/promptPrefix.tsx" "$SRC_DIR/codeview.tsx" "$SRC_DIR/bridge.ts"; do
     [ -f "$f" ] || { say "missing $f"; return 1; }
   done
   [ -f "$REPO/ui-tui/src/components/appChrome.tsx" ] || { say "Hermes TUI source not found in $REPO"; return 1; }
@@ -111,6 +111,11 @@ stage_tree() {
   python3 -I - "$stage/ui-tui/src" "$SRC_DIR" "$stage/.pl-lines" <<'PY'
 import os, sys
 src, pl, lines_out = sys.argv[1], sys.argv[2], sys.argv[3]
+# (target, our module, anchor, replacement, needs, required)
+# REQUIRED pieces are the status bar + prompt: if one no longer fits, the whole
+# build stops and hy runs the stock TUI (a broken bar is worse than none).
+# OPTIONAL pieces (code view, widget bridge) are skipped one by one with a
+# warning — after a Hermes update the bar keeps working even if they can't.
 SPECS = [
     ("components/appChrome.tsx", "powerline.tsx",
      "export function StatusRule({", "function StatusRuleClassic({",
@@ -118,49 +123,101 @@ SPECS = [
       "function ctxBarColor(", "function batteryLabel(", "function batteryColor(", "function noticeColor(",
       "function SpawnHud(", "function displayStatus(", "interface StatusRuleProps",
       "export const busyIndicatorWidth", "export const MAX_DURATION_WIDTH", "statusSessionCountLabel",
-      "$isStatusRuleOccluded", "fmtDuration", "compactNumber", "DEV_CREDITS_MODE", "stringWidth")),
+      "$isStatusRuleOccluded", "fmtDuration", "compactNumber", "DEV_CREDITS_MODE", "stringWidth"), True),
     ("lib/prompt.ts", "prompt.ts",
-     "export function composerPromptText(", "function composerPromptTextClassic(", ()),
+     "export function composerPromptText(", "function composerPromptTextClassic(", (), True),
     ("components/appLayout.tsx", "promptPrefix.tsx",
      "const PromptPrefix = memo(function PromptPrefix({", "const PromptPrefixClassic = memo(function PromptPrefix({",
-     (" memo,", "TERMUX_TUI_MODE", "<PromptPrefix ")),
+     (" memo,", "TERMUX_TUI_MODE", "<PromptPrefix "), True),
+    # Code blocks, unified diffs and tables (HERMES_CODEVIEW=0 → stock renderers at runtime).
+    ("components/markdown.tsx", "codeview.tsx",
+     "const renderTable = (k: number, rows: string[][], t: Theme, cols?: number) => {",
+     "const renderTableClassic = (k: number, rows: string[][], t: Theme, cols?: number) => {",
+     ("function MdInline(", "stripInlineMarkup", "stringWidth", "Fragment", "renderTable(key, rows, t, cols)"), False),
+    # hy widget bridge: exposes the TUI stores to $HERMES_HOME/tui-widgets/hy-*.mjs.
+    ("app/overlayStore.ts", "bridge.ts", None, None,
+     ("export const $overlayState", "export const patchOverlayState", "import { $uiState }", "OverlayState }"), False),
 ]
-# Extra one-shot insertions (exactly one anchor each). Two-line prompt: the
-# powerline row goes right above the composer's input rows.
+# Extra one-shot insertions (exactly one anchor each), keyed by target file.
 INSERTS = {
+    # Two-line prompt: the powerline row goes right above the composer's input rows.
     "components/appLayout.tsx": [
         ("{composer.inputBuf.map((line, i) => (",
          "<PlPromptLine cols={composer.cols} profileName={ui.info?.profile_name} shellMode={sh} />\n"
          "            {composer.inputBuf.map((line, i) => ("),
     ],
+    # Fenced code: try the rich panel first, the stock <Box> when it returns null.
+    "components/markdown.tsx": [
+        ("          <Box flexDirection=\"column\" key={key} paddingLeft={2}>\n"
+         "            {lang && !isDiff && <Text color={t.color.muted}>{'─ ' + lang}</Text>}",
+         "          __plCodeBlock(block, fence[2]!.trim(), t, cols, key) ?? <Box flexDirection=\"column\" key={key} paddingLeft={2}>\n"
+         "            {lang && !isDiff && <Text color={t.color.muted}>{'─ ' + lang}</Text>}"),
+    ],
+    # hy tabs: the live-session roster + the session activator (optional, insert-only).
+    "app/liveSessions.ts": [
+        ("  const liveSessionCount = sessions.length\n",
+         "  ;(globalThis as { __hySessions?: unknown }).__hySessions = sessions\n"
+         "  const liveSessionCount = sessions.length\n"),
+    ],
+    "app/useMainApp.ts": [
+        ("  const appActions = useMemo(\n",
+         "  ;(globalThis as { __hyActivateSession?: unknown }).__hyActivateSession = session.activateLiveSession\n"
+         "  const appActions = useMemo(\n"),
+    ],
 }
-problems, done = [], []
-for rel, extra, anchor, repl, needs in SPECS:
-    target = os.path.join(src, rel)
+SPEC_FILES = {s[0] for s in SPECS}
+INSERT_ONLY = [rel for rel in INSERTS if rel not in SPEC_FILES]  # always optional
+
+fatal, warn, done, inserts_only = [], [], [], []
+
+def read(rel):
     try:
-        code = open(target, encoding="utf-8").read()
+        return open(os.path.join(src, rel), encoding="utf-8").read(), None
     except OSError as e:
-        problems.append(f"{rel}: {e.strerror} — upstream moved or removed it")
+        return None, f"{rel}: {e.strerror} — upstream moved or removed it"
+
+for rel, extra, anchor, repl, needs, required in SPECS:
+    code, err = read(rel)
+    issues = [err] if err else []
+    if code is not None:
+        if anchor is not None and code.count(anchor) != 1:
+            issues.append(f"{rel}: anchor {anchor!r} found {code.count(anchor)}x — upstream changed it")
+        issues += [f"{rel}: {n!r} missing — upstream refactored it" for n in needs if n not in code]
+        issues += [f"{rel}: anchor {a!r} found {code.count(a)}x — upstream changed it"
+                   for a, _ in INSERTS.get(rel, ()) if code.count(a) != 1]
+    if issues:
+        (fatal if required else warn).extend(issues)
         continue
-    if code.count(anchor) != 1:
-        problems.append(f"{rel}: anchor {anchor!r} found {code.count(anchor)}x — upstream changed it")
-    for need in needs:
-        if need not in code:
-            problems.append(f"{rel}: {need!r} missing — upstream refactored it")
-    for a2, _ in INSERTS.get(rel, ()):
-        if code.count(a2) != 1:
-            problems.append(f"{rel}: anchor {a2!r} found {code.count(a2)}x — upstream changed it")
-    done.append((rel, extra, anchor, repl, target, code))
-if problems:
-    sys.exit("hermes-powerline is not compatible with this Hermes version:\n  " + "\n  ".join(problems))
+    done.append((rel, extra, anchor, repl, code))
+
+for rel in INSERT_ONLY:
+    code, err = read(rel)
+    issues = [err] if err else [f"{rel}: anchor {a!r} found {code.count(a)}x — upstream changed it"
+                                 for a, _ in INSERTS[rel] if code.count(a) != 1]
+    if issues:
+        warn.extend(issues)
+        continue
+    inserts_only.append((rel, code))
+
+if fatal:
+    sys.exit("hermes-powerline is not compatible with this Hermes version:\n  " + "\n  ".join(fatal))
+for w in warn:
+    print(f"skipped (optional): {w}")
+
+for rel, code in inserts_only:
+    for a, r in INSERTS[rel]:
+        code = code.replace(a, r, 1)
+    open(os.path.join(src, rel), "w", encoding="utf-8").write(code)
+    print(f"patched {rel}")
 with open(lines_out, "w", encoding="utf-8") as out:
-    for rel, extra, anchor, repl, target, code in done:
-        code = code.replace(anchor, repl, 1)
-        for a2, r2 in INSERTS.get(rel, ()):
-            code = code.replace(a2, r2, 1)
+    for rel, extra, anchor, repl, code in done:
+        if anchor is not None:
+            code = code.replace(anchor, repl, 1)
+        for a, r in INSERTS.get(rel, ()):
+            code = code.replace(a, r, 1)
         out.write(f"{rel}\t{code.count(chr(10)) + 1}\n")  # lines before our code starts
         code += "\n" + open(os.path.join(pl, extra), encoding="utf-8").read()
-        open(target, "w", encoding="utf-8").write(code)
+        open(os.path.join(src, rel), "w", encoding="utf-8").write(code)
         print(f"injected {extra} into {rel}")
 PY
 }

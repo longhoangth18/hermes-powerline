@@ -25,6 +25,7 @@ import {
 
 import {
   PL_LOOK,
+  plEdgeGray,
   plGray,
   plInk,
   plTone,
@@ -372,8 +373,8 @@ function plsStats(s: null | PlSys, keys: PlStatKey[]): PlStat[] {
     const level = st?.level ?? 0
 
     if (PL_LOOK.mono) {
-      // The block ends on the lightest grey: dark → light, left to right.
-      const bg = plGray(10 - keys.length + i)
+      // Mirrors the left bars: darkest at the right screen edge → lighter inward.
+      const bg = plEdgeGray(keys.length - 1 - i, keys.length)
 
       return { bg, fg: level ? plTone(level === 2 ? 'err' : 'warn', bg) : plInk(bg), key, text }
     }
@@ -386,10 +387,10 @@ function plsStats(s: null | PlSys, keys: PlStatKey[]): PlStat[] {
 
 const PLP_LOOK: Record<PlPromptKind, { bg: string; fg: string }> = PL_LOOK.mono
   ? {
-      agent: { bg: plGray(4), fg: plInk(plGray(4)) },
+      agent: { bg: plEdgeGray(2, 3), fg: plInk(plEdgeGray(2, 3)) },
       caret: { bg: plGray(0), fg: PL_LOOK.edge ?? '#5FD75F' },
-      host: { bg: plGray(2), fg: plInk(plGray(2)) },
-      user: { bg: plGray(0), fg: plInk(plGray(0)) }
+      host: { bg: plEdgeGray(1, 3), fg: plInk(plEdgeGray(1, 3)) },
+      user: { bg: plEdgeGray(0, 3), fg: plInk(plEdgeGray(0, 3)) }
     }
   : {
       agent: { bg: PLP_DRACULA.cyan, fg: PLP_DRACULA.bg },
@@ -411,7 +412,15 @@ function PlSegs({ segs }: { segs: PlPromptSeg[] }) {
             <Text backgroundColor={bg} bold color={fg}>
               {seg.text}
             </Text>
-            {PL_LOOK.edge ? (
+            {PL_LOOK.thin ? (
+              next ? (
+                <Text backgroundColor={PLP_LOOK[next.kind].bg} color={PL_LOOK.edge!}>
+                  {PL_LOOK.thinOf(PLP_SEP)}
+                </Text>
+              ) : (
+                <Text color={bg}>{PLP_SEP}</Text>
+              )
+            ) : PL_LOOK.edge ? (
               <>
                 <Text backgroundColor={PL_LOOK.edge} color={bg}>
                   {PLP_SEP}
@@ -480,7 +489,15 @@ const PlPromptLineInner = memo(function PlPromptLineInner(props: {
         <Box flexShrink={0}>
           {stats.map((st, i) => (
             <Text key={st.key}>
-              {PL_LOOK.edge ? (
+              {PL_LOOK.thin ? (
+                i ? (
+                  <Text backgroundColor={stats[i - 1]!.bg} color={PL_LOOK.edge!}>
+                    {PL_LOOK.thinOf(PLS_SEP_R)}
+                  </Text>
+                ) : (
+                  <Text color={st.bg}>{PLS_SEP_R}</Text>
+                )
+              ) : PL_LOOK.edge ? (
                 <>
                   <Text backgroundColor={i ? stats[i - 1]!.bg : undefined} color={PL_LOOK.edge}>
                     {PLS_SEP_R}

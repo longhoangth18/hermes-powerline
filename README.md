@@ -1,17 +1,35 @@
 # hermes-powerline
 
-A powerline-style status bar and prompt for the [Hermes Agent](https://github.com/NousResearch/hermes-agent) TUI that survives `hermes update`.
+A powerline status bar and prompt, an editor-grade code / diff / table view, an OpenCode-style live sidebar, session tabs and a matching theme for the [Hermes Agent](https://github.com/NousResearch/hermes-agent) TUI — one look for every way you open Hermes, and it survives `hermes update`.
 
 ```
- ! YOLO >> ready >> model >> 42k/200k ████░░░░ 21% >> 52 t/s >> cache 87% >> 3.2s        << ~/proj << main << 12m 04s
- user >> host >> hermes                                    << cpu 7% << gpu 8% << 14.6/32G << 176/245G << 36°C
+ ╭ ⚑ hermes  default  ⠹ working ╮                           ┃ ▍ CONTEXT 3%
+ │ ▌ python · app/rate_limit.py                    12 lines ┃  ▉░░░░░░░░░░░░░░  28k/1M
+ │   1 │ @dataclass                                         ┃  deepseek-v4.1-flash · high
+ │   2 │ class Bucket:                                      ┃ ▍ SKILLS 2
+ │   3 │     """Token bucket — refills per second."""       ┃  ⠼ superpowers:brainstorming 2s
+ │ ▌ app/rate_limit.py                              +2 −1   ┃  ✓ hermes-lcm
+ │  12 12      def take(self, n: int = 1) -> bool:          ┃ ▍ RUNNING 1
+ │  13    −        now = time.time()                        ┃  ⠼ terminal  pytest -q        4s
+ │     13 +        now = time.monotonic()                   ┃ ▍ TODO 1/3   ▍ FILES 2   ▍ MCP 7/8
+ ! YOLO › ready › model › 42k/1M ▉▉░░ 4% › 52 t/s › 3.2s            ‹ ~/proj ‹ main ‹ 12m 04s
+ user › host › hermes                              ‹ cpu 7% ‹ gpu 8% ‹ 14.6/32G ‹ 176/245G ‹ 36°C
  ❯ Ask me anything…
+ ⌂ ( ✓ 1 refactor rate limiter ) ( ⠼ 2 pentest notes ) ( ✓ 3 docs )              ^X switch · /new
 ```
 
-- Grey ramp, dark → light, white text, a green `>` band between segments (all configurable).
-- Row 1: status, model, context meter, tokens/s, cache hit, latency · folder, git branch, session clock.
-- Row 2: user / host / agent · CPU, GPU, RAM, disk, temperature.
-- Narrow terminals shed segments whole instead of clipping them.
+| Piece | What you get |
+| --- | --- |
+| **Status bar + prompt** | Two powerline rows. Every bar runs dark at the screen edge → lighter toward the middle (mirrored left/right); a thin jade `›` chevron between cells. Status, model, context meter, real per-call t/s and latency, cache hit, API-error alarm, inbox alarm · folder, branch, clock · user/host/agent · CPU, GPU, RAM, disk, temperature. |
+| **Code view** | Fenced code becomes a filled editor panel: language chip + icon (`lang:path` fences show the file), line numbers, soft-wrap with `↪`, and a real multi-line tokenizer for ~30 languages (block comments and docstrings that span lines, functions, types, constants, decorators, shell commands/flags/`$vars`, JSON/YAML keys, HTML tags/attributes, CSS). |
+| **Diff view** | Unified diffs — ```` ```diff ```` blocks *and* the inline diffs Hermes emits for `patch` / `write_file` — get a per-file header with `+N −M`, old/new line numbers, tinted add/remove rows, and the changed code syntax-highlighted by file type. |
+| **Tables** | Rounded box borders, a header band, numeric columns right-aligned, inline markdown kept in cells. |
+| **hy sidebar** | Right rail (auto on terminals ≥ 112 columns, `/hy-sidebar` toggles): session title + cwd/branch, smooth context gauge, model + effort, calls/tokens/cache; **skills loading (spinner + glow) and loaded** this session (subagents' skills marked `↳`); running tools with timers; subagents; todo progress; files changed; MCP server health. |
+| **hy tabs** | Every live session as a clickable pill above the bar — current one jade, working ones spin and glow. `^X` opens the full switcher, `/new` starts a session. Hidden with a single session. |
+| **hy-jade theme** | One palette for the TUI skin *and* the web dashboard theme (web chat included): graphite greys + jade `#5FD75F`, exact xterm-256 tones so tmux / Termius look the same as truecolor terminals. |
+| **One look everywhere** | Optional zsh hook: `hermes`, `hermes --yolo`, `hermes -p <profile>`, `hermes chat`, `hermes dashboard` (its web chat spawns the same TUI build) and `hy` all run the same build. Admin subcommands and `-z` go straight to the real binary. |
+
+📖 Full guide in Vietnamese (install, architecture, customising, testing, troubleshooting): [docs/HUONG-DAN.md](docs/HUONG-DAN.md)
 
 ## Requirements
 
@@ -29,14 +47,28 @@ cd hermes-powerline
 hermes-powerline run        # instead of `hermes`
 ```
 
-`install.sh` symlinks this checkout into `~/.hermes/powerline` and `~/.local/bin`, so updating is `git pull`. Remove with `./uninstall.sh`.
+Options: `--shell` adds the zsh hook so plain `hermes` uses the same build (recommended), `--keep-skin` leaves your `display.skin` / `dashboard.theme` alone, `--copy` copies instead of symlinking.
+
+`install.sh` symlinks this checkout into place, so updating is `git pull`:
+
+| From this repo | Goes to | Used by |
+| --- | --- | --- |
+| `src/*.tsx`, `src/*.ts` | `~/.hermes/powerline/` | the build (injected into a staged copy of the Hermes TUI) |
+| `bin/hermes-powerline` | `~/.local/bin/` | launcher / builder |
+| `plugin/powerline-net` | `~/.hermes/plugins/` | real per-call t/s, TTFT, API errors |
+| `widgets/hy-*.mjs` | `~/.hermes/tui-widgets/` and every `~/.hermes/profiles/*/tui-widgets/` | sidebar + tabs (Hermes' official user-widget slot) |
+| `skins/hy-jade.yaml` | `~/.hermes/skins/` (+ profiles) | TUI / CLI skin |
+| `dashboard-themes/hy-jade.yaml` | `~/.hermes/dashboard-themes/` | web dashboard + web chat |
+| `shell/hermes-powerline.zsh` | sourced from `~/.zshrc` (`--shell`) | routes interactive `hermes` launches |
+
+Remove everything with `./uninstall.sh` (it also resets `display.skin` / `dashboard.theme` if they were `hy-jade`).
 
 ## How it works, and why updates don't break it
 
 Hermes has no plugin API for the status bar, but it does support running a prebuilt TUI from `$HERMES_TUI_DIR`. `hermes-powerline`:
 
 1. copies the Hermes TUI source to a staging dir **outside** the Hermes checkout (Hermes' own files are never modified, so `hermes update` never conflicts);
-2. appends three source files to it and renames the stock components they replace;
+2. appends our source files to it and renames the stock components they replace (see *What gets injected*);
 3. builds that into `~/.hermes/powerline/tui` and launches Hermes pointing at it.
 
 The build is stamped with the Hermes commit and source state. After `hermes update` the next launch rebuilds by itself (a few seconds). Four layers keep a Hermes update from leaving you with a broken TUI:
@@ -49,6 +81,23 @@ The build is stamped with the Hermes commit and source state. After `hermes upda
 | React error boundary | a runtime error while rendering | that piece falls back to the stock component |
 
 `hermes-powerline doctor` runs the first three in a throwaway directory and reports. The `compat` workflow in this repo runs it daily against Hermes `main`.
+
+### What gets injected — required vs optional
+
+| Target in the Hermes TUI | Our file | How | If an update breaks the anchor |
+| --- | --- | --- | --- |
+| `components/appChrome.tsx` | `powerline.tsx` | rename `StatusRule` → `StatusRuleClassic`, append | **required** → stock TUI |
+| `lib/prompt.ts` | `prompt.ts` | rename `composerPromptText`, append | **required** → stock TUI |
+| `components/appLayout.tsx` | `promptPrefix.tsx` | rename `PromptPrefix`, append, one insert above the input rows | **required** → stock TUI |
+| `components/markdown.tsx` | `codeview.tsx` | rename `renderTable` → `renderTableClassic`, append, one insert in the fenced-code branch | optional → stock code/table rendering, bar unaffected |
+| `app/overlayStore.ts` | `bridge.ts` | append (publishes `globalThis.__hy` for the widgets) | optional → widgets stay hidden |
+| `app/liveSessions.ts`, `app/useMainApp.ts` | — | one line each (session roster + switcher for the tabs) | optional → tabs stay hidden |
+
+Optional pieces are skipped one by one with a `skipped (optional): …` line; the rest still builds. At runtime every piece has its own guard: `HERMES_CODEVIEW=0` restores stock code/tables, `HY_SIDEBAR=0` / `HY_TABS=0` keep the widgets closed, and the widgets render nothing when the bridge is absent (plain stock Hermes), so installing the widgets can never clutter an un-powerlined TUI. Widget errors are caught by Hermes' own widget error boundary; a broken code panel falls back to the stock renderer for that block.
+
+## Cost on the machine
+
+Measured on an M-series Mac, TUI idle for 30 s: 0.29 s CPU with sidebar + tabs, 0.26 s without (≈ 1 % of one core either way). The widgets only repaint on store changes or while something animates; `state.db` is read (read-only) every 3 s while busy, 15 s idle; the inbox alarm runs `hermes inbox --json` once a minute.
 
 ## Commands
 
@@ -63,6 +112,16 @@ twoline on|off  sys on|off         on|off
 ```
 
 `HERMES_POWERLINE=0 hermes-powerline run` gives the classic bar for one launch.
+
+In Hermes: `/hy-sidebar` and `/hy-tabs` toggle the widgets; `^X` is the session switcher.
+
+| Setting | Where | Effect |
+| --- | --- | --- |
+| `"inbox": false` | `~/.hermes/powerline/config.json` | no inbox alarm cell |
+| `"edgeThin": false` | same | bold 2-cell separators instead of the thin chevron |
+| `HERMES_CODEVIEW=0` | env | stock code blocks / diffs / tables |
+| `HY_SIDEBAR=0`, `HY_TABS=0` | env | widgets closed at start (toggle still works) |
+| `command hermes …` | shell | bypass the zsh hook once |
 
 ## What the numbers mean
 
@@ -79,6 +138,13 @@ twoline on|off  sys on|off         on|off
 | temperature | `macmon` | the hotter of the CPU and GPU averages. |
 
 Values turn orange, then red, at: CPU/GPU 70/90 %, RAM 75/90 %, disk 85/95 %, temperature 70/85 °C, context 75/90 %.
+
+## Developing and testing
+
+- `hermes-powerline doctor` — inject + typecheck + build in a throwaway dir.
+- Simulate a Hermes update: copy the Hermes TUI to a scratch dir (symlink `node_modules`, `apps/shared`), edit an anchor there, and run `HERMES_AGENT_DIR=<copy> hermes-powerline doctor`. Breaking `markdown.tsx` or `liveSessions.ts` must print `skipped (optional)` and still build; breaking `StatusRule` must report *not compatible* and `ensure` must exit non-zero (the launcher then runs stock `hermes`).
+- Visual checks: run the TUI in `tmux` (`COLORTERM=truecolor`), `tmux capture-pane -e`, render the ANSI to PNG. Quit test TUIs with `/quit` — killing them leaves orphaned live sessions in the gateway until it restarts.
+- Widgets hot-reload: Hermes watches `~/.hermes/tui-widgets/`, so saving a `widgets/*.mjs` file applies it to running TUIs.
 
 ## Known limits
 
