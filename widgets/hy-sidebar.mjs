@@ -323,6 +323,10 @@ function routeStates() {
 globalThis.__hyRouteStates = routeStates
 globalThis.__hyRouteOf = routeOf
 
+// Section folding: key → collapsed? (a header click sets it; otherwise each
+// section decides — MCP folds itself while nothing is calling and nothing is broken).
+const collapsed = new Map()
+
 // Hermes archives the todo list into the transcript when a turn ends; keep the
 // last one per session so the sidebar still shows how far the plan got.
 const lastTodos = new Map()
@@ -447,18 +451,21 @@ export default function register(sdk) {
   }
 
   // Section header — Crush style: " ICON TITLE ──────────── right".
-  const Head = ({ c, icon, title, right, rightColor }) => {
-    const label = ` ${icon} ${title} `
+  const Head = ({ c, icon, title, right, rightColor, open, onToggle }) => {
+    const chev = open == null ? '' : open ? '▾' : '▸'
+    const label = `${chev || ' '} ${icon} ${title} `
     const r = right ? ` ${right}` : ''
     const fill = Math.max(2, W - label.length - r.length)
-
-    return h(
+    const line = h(
       Text,
       { wrap: 'truncate-end' },
-      h(Text, { bold: true, color: c.accent }, label),
+      h(Text, { color: open ? c.accent : c.dim }, `${chev || ' '} `),
+      h(Text, { bold: true, color: open === false ? c.dim : c.accent }, `${icon} ${title} `),
       h(Text, { color: c.line }, '─'.repeat(fill)),
       r ? h(Text, { bold: true, color: rightColor ?? c.dim }, r) : null
     )
+
+    return onToggle ? h(Box, { onClick: onToggle }, line) : line
   }
 
   const Row = ({ c, mark, markColor, text, color, right, rightColor, dim, bold, glowNow, strike }) => {
@@ -594,10 +601,25 @@ export default function register(sdk) {
       used += lines
     }
 
-    const section = (key, head, body) => {
-      if (body.length) {
-        push(h(Box, { flexDirection: 'column', key, marginTop: 1 }, head, ...body), body.length + 2)
+    const isOpen = (key, autoCollapsed = false) => !(collapsed.has(key) ? collapsed.get(key) : autoCollapsed)
+
+    // A section: header (click to fold/unfold) + rows. Folded → the header alone, its
+    // right-hand summary still says what is inside.
+    const section = (key, head, body, autoCollapsed = false) => {
+      if (!body.length) {
+        return
       }
+
+      const open = isOpen(key, autoCollapsed)
+      const hd = React.cloneElement(head, {
+        onToggle: () => {
+          collapsed.set(key, open)
+          force(n => n + 1)
+        },
+        open
+      })
+
+      push(h(Box, { flexDirection: 'column', key, marginTop: 1 }, hd, ...(open ? body : [])), open ? body.length + 2 : 2)
     }
 
     // ── title block ──
@@ -915,8 +937,11 @@ export default function register(sdk) {
 
     // Compact: at most 2 rows of tiles. Loading skills first (pulsing), then the
     // ones used this session (most recent first, lit), then the rest dimmed.
+    // MCP folds itself while nothing is calling and every server is fine.
+    const mcpAuto = mcpLive.size === 0 && servers.every(m => m.connected || ['connected', 'lazy', 'configured', 'disabled'].includes(m.status))
+    const mcpOpen = isOpen('mcp', mcpAuto)
     const filesN = Math.min(6, data?.files?.size ?? 0)
-    const reserve = (mcpRows.length ? mcpRows.length + 2 : 0) + (filesN ? filesN + 2 : 0) + 3 // + footer
+    const reserve = (mcpRows.length ? (mcpOpen ? mcpRows.length + 2 : 2) : 0) + (filesN ? filesN + 2 : 0) + 3 // + footer
     const room = Math.max(0, Math.min(2, rows - used - 3 - reserve))
     const recent = [...(data?.skills?.keys() ?? [])].map(skillKey).reverse()
     const rank = name => {
@@ -976,7 +1001,8 @@ export default function register(sdk) {
         rightColor: mcpLive.size ? c.orange : upN === servers.length ? c.green : c.yellow,
         title: 'MCP'
       }),
-      mcpRows
+      mcpRows,
+      mcpAuto
     )
 
     // ── FILES ──

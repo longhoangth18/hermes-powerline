@@ -329,6 +329,94 @@ function usePlInbox(): null | PlInbox {
   return inbox
 }
 
+// ── git working-tree cell ──
+// Not shown anywhere else (the sidebar has cwd/branch, not the tree state): changed files,
+// untracked, conflicts, ahead/behind the upstream. `git status --porcelain=v2 --branch`
+// async every 8 s (20 s outside a repo); no repo or any error → the cell hides.
+interface PlGit {
+  ahead: number
+  behind: number
+  changed: number
+  conflicts: number
+  untracked: number
+}
+
+const plGitParse = (out: string): PlGit => {
+  const g: PlGit = { ahead: 0, behind: 0, changed: 0, conflicts: 0, untracked: 0 }
+
+  for (const line of out.split('\n')) {
+    const ab = line.match(/^# branch\.ab \+(\d+) -(\d+)/)
+
+    if (ab) {
+      g.ahead = Number(ab[1])
+      g.behind = Number(ab[2])
+    } else if (line.startsWith('1 ') || line.startsWith('2 ')) {
+      g.changed++
+    } else if (line.startsWith('u ')) {
+      g.conflicts++
+    } else if (line.startsWith('? ')) {
+      g.untracked++
+    }
+  }
+
+  return g
+}
+
+function usePlGit(): null | PlGit {
+  const [git, setGit] = useState<null | PlGit>(null)
+  const last = useRef('')
+
+  useEffect(() => {
+    if (process.env.HERMES_POWERLINE_GIT === '0') {
+      return
+    }
+
+    let alive = true
+    let timer: ReturnType<typeof setTimeout> | undefined
+
+    const run = () => {
+      // The TUI process runs inside its own build dir; the session's working dir comes from
+      // the session info, else the launch dir Hermes passes down (HERMES_TUI_CWD / HERMES_CWD).
+      const cwd =
+        (globalThis as { __hy?: { ui?: { get?: () => { info?: { cwd?: string } } } } }).__hy?.ui?.get?.()?.info?.cwd ||
+        process.env.HERMES_TUI_CWD ||
+        process.env.HERMES_CWD ||
+        process.env.PWD ||
+        process.cwd()
+
+      __plExecFile(
+        'git',
+        ['-C', cwd, 'status', '--porcelain=v2', '--branch', '--untracked-files=normal'],
+        { env: { ...process.env, GIT_OPTIONAL_LOCKS: '0', LC_ALL: 'C' }, maxBuffer: 2 << 20, timeout: 4_000 },
+        (err, stdout) => {
+          if (!alive) {
+            return
+          }
+
+          const next = err ? null : plGitParse(String(stdout))
+          const key = JSON.stringify(next)
+
+          if (key !== last.current) {
+            last.current = key
+            setGit(next)
+          }
+
+          timer = setTimeout(run, err ? 20_000 : 8_000)
+        }
+      )
+    }
+
+    timer = setTimeout(run, 1_500)
+
+    return () => {
+      alive = false
+      clearTimeout(timer)
+    }
+  }, [])
+
+  return git
+}
+
 const PL_ERR_SHORT: Record<string, string> = {
   auth: 'auth',
   auth_permanent: 'auth',
@@ -584,6 +672,7 @@ function PowerlineRule(p: StatusRuleProps) {
   const { busy, cols, t, usage } = p
   const net = usePlNet()
   const inbox = usePlInbox()
+  const git = usePlGit()
   const T = messages()
   const sep = PL_SEPS[PL_CONF.style] ?? PL_SEPS.arrow
   // Icon + gap (2 cells by default, so full-size Nerd Font glyphs have room).
@@ -818,6 +907,20 @@ function PowerlineRule(p: StatusRuleProps) {
         }
       }
     }
+  }
+
+  // git tree state, right before the clock: ±changed ?untracked !conflicts ↑ahead ↓behind, or ✓.
+  if (git && sharedW > 0) {
+    const bits = [
+      git.conflicts ? `!${git.conflicts}` : '',
+      git.changed ? `±${git.changed}` : '',
+      git.untracked ? `?${git.untracked}` : '',
+      git.ahead ? `↑${git.ahead}` : '',
+      git.behind ? `↓${git.behind}` : ''
+    ].filter(Boolean)
+    const txt = ` ${ic('\u{f02a2}')}${bits.length ? bits.join(' ') : '✓'} `
+
+    rCells.push({ bg: C.mid, bold: bits.length > 0, fg: mono ? __plInk(C.mid) : C.branch, text: txt })
   }
 
   // Mono: the top-right block mirrors the left bar — darkest cell at the right

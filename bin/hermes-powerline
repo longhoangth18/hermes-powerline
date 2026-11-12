@@ -133,10 +133,10 @@ SPECS = [
     ("components/markdown.tsx", "codeview.tsx",
      "const renderTable = (k: number, rows: string[][], t: Theme, cols?: number) => {",
      "const renderTableClassic = (k: number, rows: string[][], t: Theme, cols?: number) => {",
-     ("function MdInline(", "stripInlineMarkup", "stringWidth", "Fragment", "renderTable(key, rows, t, cols)"), False),
+     ("function MdInline(", "const stripInlineMarkup =", "stringWidth", "Fragment", "renderTable(key, rows, t, cols)", "const indentDepth =", "const HEADING_RE ="), False),
     # hy widget bridge: exposes the TUI stores to $HERMES_HOME/tui-widgets/hy-*.mjs.
     ("app/overlayStore.ts", "bridge.ts", None, None,
-     ("export const $overlayState", "export const patchOverlayState", "import { $uiState }", "OverlayState }"), False),
+     ("export const $overlayState =", "export const patchOverlayState =", "import { $uiState }", "OverlayState }"), False),
 ]
 # Extra one-shot insertions (exactly one anchor each), keyed by target file.
 INSERTS = {
@@ -218,6 +218,7 @@ INSERTS = {
          "  const appActions = useMemo(\n"),
     ],
 }
+SKIP = {x for x in os.environ.get("HPL_SKIP", "").split(",") if x}
 SPEC_FILES = {s[0] for s in SPECS}
 INSERT_ONLY = [rel for rel in INSERTS if rel not in SPEC_FILES]  # always optional
 
@@ -230,6 +231,9 @@ def read(rel):
         return None, f"{rel}: {e.strerror} — upstream moved or removed it"
 
 for rel, extra, anchor, repl, needs, required in SPECS:
+    if rel in SKIP and not required:
+        warn.append(f"{rel}: dropped after a type error in our code there")
+        continue
     code, err = read(rel)
     issues = [err] if err else []
     if code is not None:
@@ -244,6 +248,9 @@ for rel, extra, anchor, repl, needs, required in SPECS:
     done.append((rel, extra, anchor, repl, code))
 
 for rel in INSERT_ONLY:
+    if rel in SKIP:
+        warn.append(f"{rel}: dropped after a type error in our code there")
+        continue
     code, err = read(rel)
     issues = [err] if err else [f"{rel}: anchor {a!r} found {code.count(a)}x — upstream changed it"
                                  for a, _ in INSERTS[rel] if code.count(a) != 1]
@@ -257,17 +264,35 @@ if fatal:
 for w in warn:
     print(f"skipped (optional): {w}")
 
+def ranges(code, rel):
+    """Line ranges of our inserted text in the final file (typecheck attributes errors there to us)."""
+    out = []
+    for _, r in INSERTS.get(rel, ()):
+        i = code.find(r)
+        if i >= 0:
+            a = code[:i].count("\n") + 1
+            out.append(f"{rel}\t@{a}-{a + r.count(chr(10))}")
+    return out
+
+optional = sorted({s[0] for s in SPECS if not s[5]} | set(INSERT_ONLY))
+open(lines_out + ".optional", "w", encoding="utf-8").write("\n".join(optional) + "\n")
+range_lines = []
 for rel, code in inserts_only:
     for a, r in INSERTS[rel]:
         code = code.replace(a, r, 1)
+    range_lines += ranges(code, rel)
     open(os.path.join(src, rel), "w", encoding="utf-8").write(code)
     print(f"patched {rel}")
 with open(lines_out, "w", encoding="utf-8") as out:
+    for l in range_lines:
+        out.write(l + "\n")
     for rel, extra, anchor, repl, code in done:
         if anchor is not None:
             code = code.replace(anchor, repl, 1)
         for a, r in INSERTS.get(rel, ()):
             code = code.replace(a, r, 1)
+        for l in ranges(code, rel):
+            out.write(l + "\n")
         out.write(f"{rel}\t{code.count(chr(10)) + 1}\n")  # lines before our code starts
         code += "\n" + open(os.path.join(pl, extra), encoding="utf-8").read()
         open(os.path.join(src, rel), "w", encoding="utf-8").write(code)
@@ -283,19 +308,35 @@ typecheck() {
   [ -x "$tsc" ] || { echo "typecheck: tsc not installed in $REPO — skipped"; return 0; }
   local tsc_rc=0
   "$tsc" --noEmit -p "$stage/ui-tui/tsconfig.json" >"$stage/.tsc.log" 2>&1 || tsc_rc=$?
-  python3 -I - "$stage/.pl-lines" "$stage/.tsc.log" "$tsc_rc" <<'PY'
+  python3 -I - "$stage/.pl-lines" "$stage/.tsc.log" "$tsc_rc" "$stage/.tc-bad" <<'PY'
 import re, sys
-starts = dict(l.rstrip("\n").split("\t") for l in open(sys.argv[1], encoding="utf-8") if "\t" in l)
-ours, total = [], 0
+starts, spans = {}, []
+for l in open(sys.argv[1], encoding="utf-8"):
+    if "\t" not in l:
+        continue
+    rel, v = l.rstrip("\n").split("\t")
+    if v.startswith("@"):
+        a, b = v[1:].split("-")
+        spans.append((rel, int(a), int(b)))
+    else:
+        starts[rel] = int(v)
+ours, bad, total = [], set(), 0
 for line in open(sys.argv[2], encoding="utf-8", errors="replace"):
     m = re.match(r"(.+?)\((\d+),\d+\): error TS\d+", line)
     if not m:
         continue
     total += 1
-    path = m.group(1).replace("\\", "/")
+    path, n = m.group(1).replace("\\", "/"), int(m.group(2))
+    msg = line.split(": error ", 1)[1].strip()
     for rel, start in starts.items():
-        if path.endswith("src/" + rel) and int(m.group(2)) >= int(start):
-            ours.append(f"{rel}: our line {int(m.group(2)) - int(start) + 1}: {line.split(': error ', 1)[1].strip()}")
+        if path.endswith("src/" + rel) and n >= start:
+            ours.append(f"{rel}: our line {n - start + 1}: {msg}")
+            bad.add(rel)
+    for rel, a, b in spans:
+        if path.endswith("src/" + rel) and a <= n <= b:
+            ours.append(f"{rel}: inserted line {n}: {msg}")
+            bad.add(rel)
+open(sys.argv[4], "w", encoding="utf-8").write("\n".join(sorted(bad)) + ("\n" if bad else ""))
 if total == 0 and sys.argv[3] != "0":
     # tsc died without reporting a single type error: it did not really run.
     print("typecheck: tsc could not run — skipped")
@@ -308,6 +349,25 @@ sys.exit(1 if ours else 0)
 PY
 }
 
+# stage_checked <stage> — stage + typecheck; if every type error sits in OPTIONAL pieces,
+# re-stage once without them (HPL_SKIP), so an upstream change that breaks the code view or
+# the widget bridge costs only that piece, never the status bar.
+stage_checked() {
+  local stage="$1" bad
+  stage_tree "$stage" || return 1
+  [ "${HPL_NO_TYPECHECK:-}" = 1 ] && return 0
+  typecheck "$stage" && return 0
+  bad="$(tr '\n' ',' <"$stage/.tc-bad" 2>/dev/null | sed 's/,$//')"
+  [ -n "$bad" ] || return 1
+  local rel
+  for rel in ${bad//,/ }; do
+    grep -qx "$rel" "$stage/.pl-lines.optional" 2>/dev/null || return 1 # a required piece broke
+  done
+  echo "retrying without the optional piece(s) that failed to typecheck: $bad"
+  HPL_SKIP="$bad" stage_tree "$stage" || return 1
+  typecheck "$stage"
+}
+
 build() {
   local stamp="$1"
   check_sources || return 1
@@ -316,10 +376,10 @@ build() {
   say "building powerline TUI for Hermes $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null)… (log: $LOG)"
   (
     cd "$PL" || exit 1 # never build from inside the stage we're about to delete
-    stage_tree "$STAGE" || exit 1
     # Type errors in OUR code mean a helper changed shape upstream: the bundle
-    # would still build but could misbehave at runtime. Stock bar instead.
-    typecheck "$STAGE" || exit 1
+    # would still build but could misbehave at runtime. Optional pieces are
+    # dropped and retried once; a broken required piece → stock bar instead.
+    stage_checked "$STAGE" || exit 1
     # Invalidate first: if the build dies half-way, the old build must never
     # be mistaken for a fresh one.
     rm -f "$STAMP_FILE"
@@ -344,19 +404,22 @@ doctor() {
   # real paths, and macOS temp dirs sit behind the /var → /private/var symlink.
   tmp="$(cd "$tmp" && pwd -P)" || return 1
   echo "hermes-powerline $VERSION · Hermes $(git -C "$REPO" rev-parse --short HEAD 2>/dev/null || echo '?') · node $(node --version 2>/dev/null || echo missing)"
-  if (cd "$tmp" && stage_tree "$tmp/stage"); then
+  local noc=""
+  [ "${1:-}" = "--no-typecheck" ] && noc=1
+  # Same path as a real launch: stage, typecheck, drop failing optional pieces once.
+  if (cd "$tmp" && HPL_NO_TYPECHECK="$noc" stage_checked "$tmp/stage"); then
     echo "inject: ok"
-    if [ "${1:-}" != "--no-typecheck" ]; then
-      typecheck "$tmp/stage" || rc=1
-    fi
+  else
+    [ -f "$tmp/stage/.pl-lines" ] && echo "inject: ok" || echo "inject: FAILED"
+    rc=1
+  fi
+  if [ -d "$tmp/stage/ui-tui" ]; then
     if node "$tmp/stage/scripts/build/tui.mjs" --source "$tmp/stage" --out "$tmp/out" >"$tmp/build.log" 2>&1 \
       && [ -f "$tmp/out/dist/entry.js" ]; then
       echo "build: ok"
     else
       echo "build: FAILED"; tail -15 "$tmp/build.log"; rc=1
     fi
-  else
-    echo "inject: FAILED"; rc=1
   fi
   if [ -n "${HERMES_POWERLINE_KEEP:-}" ]; then echo "kept: $tmp"; else rm -rf "$tmp"; fi
   if [ $rc -eq 0 ]; then echo "all good"; else echo "problems found — Hermes will use its stock TUI until this is fixed"; fi
