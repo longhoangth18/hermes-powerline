@@ -245,8 +245,10 @@ export default function register(sdk) {
         } catch {
           // ignore
         }
-      } else if (++tries < 40) {
-        setTimeout(boot, 250)
+      } else if (++tries < 160) {
+        // The roster arrives with the first live-session poll, which can take a while
+        // right after the gateway (re)starts: keep trying for ~2 minutes.
+        setTimeout(boot, tries < 40 ? 250 : 1000)
       }
     }
 

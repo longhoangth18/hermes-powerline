@@ -62,18 +62,20 @@ interface PlCvPal {
 // round to a washed-out cube grey. Accent hexes round to close neighbours.
 const PL_CV_DARK: PlCvPal = {
   accent: __cvHY.accent, // language chip (green)
-  addBg: __cvHY.truecolor ? '#1A3A1A' : '#0B3B14', // OpenCode Dracula · 256: → 22
+  // 256 colours: the only dark greens/reds are cube 22/52 (#005f00/#5f0000) — loud as a full
+  // row fill, so rows keep the panel background and only the gutter + marker carry the colour.
+  addBg: __cvHY.truecolor ? '#1A3A1A' : __cvHY.deep, // OpenCode Dracula
   addFg: __cvHY.green,
-  addGut: __cvHY.truecolor ? '#224A22' : '#0B3B14',
+  addGut: __cvHY.truecolor ? '#224A22' : '#0B3B14', // 256: → 22
   attr: __cvHY.green, // HTML attributes
   bg: __cvHY.deep, // editor panel (#21222C)
   border: __cvHY.line,
   cnst: __cvHY.purple, // true/false/null/self, ALL_CAPS
   com: __cvHY.comment,
   deco: __cvHY.green, // @decorators
-  delBg: __cvHY.truecolor ? '#3A1A1A' : '#420C12', // OpenCode Dracula · 256: → 52
+  delBg: __cvHY.truecolor ? '#3A1A1A' : __cvHY.deep, // OpenCode Dracula
   delFg: __cvHY.red,
-  delGut: __cvHY.truecolor ? '#4A2222' : '#420C12',
+  delGut: __cvHY.truecolor ? '#4A2222' : '#420C12', // 256: → 52
   fn: __cvHY.green, // functions / commands
   gutter: __cvHY.truecolor ? '#6272A4' : '#6C6C6C',
   head: __cvHY.line, // header band (#44475A)
@@ -1152,7 +1154,7 @@ function plCvDiffPanel(block: string[], t: Theme, cols: number | undefined, key:
       <PlCvHeader
         icon={'\u{f055a}'}
         key={`h${fi}`}
-        label={plCvShortPath(f.path, width - 24) || 'diff'}
+        label={plCvShortPath(f.path, Math.min(48, width - 24)) || 'diff'}
         pal={pal}
         right={right}
         width={width}
