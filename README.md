@@ -20,7 +20,7 @@ A powerline status bar and prompt, an editor-grade code / diff / table view, an 
 
 | Piece | What you get |
 | --- | --- |
-| **Status bar + prompt** | Two powerline rows; every bar dark at the screen edge → lighter toward the middle (Dracula canvas tones on truecolor, exact xterm greys at 256 colours); thin `›` chevrons. While the hy sidebar is open, cells it already shows (model, context, cache, title/folder/branch, subagents) leave the bar — no duplicated information. |
+| **Status bar + prompt** | Two powerline rows; every bar dark at the screen edge → lighter toward the middle (Dracula canvas tones on truecolor, exact xterm greys at 256 colours); thin `›` chevrons; a git cell before the clock shows the working tree (`±3 ?1 ↑2`, `✓` when clean). While the hy sidebar is open, cells it already shows (model, context, cache, title/folder/branch, subagents) leave the bar — no duplicated information. |
 | **Code view** | Editor panel per fenced block: language chip + icon (`lang:path` shows the file), line numbers, soft-wrap, multi-line tokenizer for ~30 languages with the Dracula spec mapping (keywords pink, strings yellow, numbers orange, functions green, types cyan italic, constants purple italic, decorators green italic, comments `#6272A4` italic). |
 | **Diff view** | Unified diffs and Hermes' inline `patch`/`write_file` diffs: per-file header with `+N −M`, old/new line numbers, `#1A3A1A`/`#3A1A1A` rows, code highlighted by file type. |
 | **Markdown** | Dracula markdown: H1 band, `▍` H2, `◆` H3, bold orange, italic yellow, inline code as green chips, `▌` yellow quotes, coloured bullets / numbers / task boxes, `─ ◆ ─` rules, bordered tables. Final answers a plugin coloured with ANSI stay markdown (stock Hermes renders them raw). |
