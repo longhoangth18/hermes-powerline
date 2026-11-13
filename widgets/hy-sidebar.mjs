@@ -12,6 +12,8 @@
 //   MCP        every server: health dot + word · in use (spinner) · calls this session
 //   FILES      written / patched files
 //   …pinned:   cwd · branch
+//              CLAUDE  claude-sub jobs: lit while Claude Code works, flash on finish, last day's
+//                      history (✓ done × error ◔ limit ◷ timeout ⊘ cancelled ? lost), ✗ denials
 //
 // Data: live TUI stores via globalThis.__hy (bridge.ts); history from state.db
 // (read-only, node:sqlite): skills, delegations (task → route), subagent
@@ -238,6 +240,47 @@ async function readSession(sid) {
 // Read lazily, re-read when config.yaml changes (checked at most every 10 s).
 let routeCfg = null
 
+// A config's primary model and provider: the model: block, up to the next top-level key (comments allowed).
+function modelOf(text) {
+  const block = String(text).match(/^model:\n([\s\S]*?)(?=^[^\s#])/m)?.[1] ?? ''
+  const pick = key => block.match(new RegExp(`^[ \\t]+${key}:\\s*["']?([^"'\\n#]+?)["']?\\s*(?:#.*)?$`, 'm'))?.[1]?.trim()
+  const model = pick('default') || pick('model')
+
+  return model ? { model, provider: pick('provider') || '' } : null
+}
+
+// Providers the route profiles run on besides main's, with their models and routes, and whether one of
+// those routes is working now — re-read from the configs (cached 10 s, mtime-checked), never hard-coded,
+// so moving Kimi to another route or Coarena to another model shows up by itself. Published for the bar.
+function providerLines() {
+  const cfg = routeConfig()
+  const states = routeStates()
+  const mainProv = cfg.main?.provider ?? ''
+  const groups = new Map()
+
+  for (const [route, rc] of cfg.routes) {
+    if (!rc.provider || rc.provider === mainProv) {
+      continue
+    }
+
+    const g = groups.get(rc.provider) ?? { models: new Set(), provider: rc.provider, routes: [], state: 'idle' }
+    const st = states.get(route) ?? 'idle'
+
+    g.models.add(rc.model)
+    g.routes.push(route)
+    g.state = st === 'active' || g.state === 'active' ? 'active' : st === 'failed' || g.state === 'failed' ? 'failed' : st === 'done' || g.state === 'done' ? 'done' : 'idle'
+    groups.set(rc.provider, g)
+  }
+
+  return [...groups.values()].map(g => ({
+    label: g.provider.replace(/^custom:/, ''),
+    models: [...g.models],
+    provider: g.provider,
+    routes: g.routes.sort(),
+    state: g.state
+  }))
+}
+
 function routeConfig() {
   const now = Date.now()
 
@@ -245,7 +288,7 @@ function routeConfig() {
     return routeCfg
   }
 
-  const cfg = { at: now, byModel: new Map(), def: null, mtime: routeCfg?.mtime ?? 0 }
+  const cfg = { at: now, byModel: new Map(), def: null, main: null, mtime: routeCfg?.mtime ?? 0, routes: new Map() }
 
   try {
     const fs = process.getBuiltinModule?.('node:fs')
@@ -261,6 +304,7 @@ function routeConfig() {
 
     cfg.mtime = mtime
     const text = fs.readFileSync(`${root}/config.yaml`, 'utf8')
+    cfg.main = modelOf(text)
     // The block ends at the next top-level KEY; column-0 comments inside it are fine in YAML.
     const block = text.match(/^delegation:\n([\s\S]*?)(?=^[^\s#])/m)?.[1] ?? ''
     const routesAt = block.indexOf('profile_routes:')
@@ -275,6 +319,11 @@ function routeConfig() {
       try {
         const pc = fs.readFileSync(`${root}/profiles/${r}/config.yaml`, 'utf8')
         const model = pc.match(/^model:\n(?:[ \t]+#.*\n)*[ \t]+(?:default|model):\s*["']?([^"'\n]+?)["']?\s*$/m)?.[1]
+        const route = modelOf(pc)
+
+        if (route) {
+          cfg.routes.set(r, route)
+        }
 
         if (model) {
           owners.set(model, [...(owners.get(model) ?? []), r])
@@ -312,6 +361,258 @@ function routesList() {
 
 // The session the TUI shows right now (stored id first: that is what state.db knows).
 const currentSid = ui => ui?.storedSid || ui?.info?.stored_session_id || ui?.sid || null
+
+// ── claude-sub: Claude Code jobs (the coding hand behind the coder route) ─────────────────────────
+// claude-sub (~/repos/hermes-claude-sub) keeps one dir per job under $CLAUDE_SUB_HOME/jobs (default
+// ~/.cache/claude-sub): meta.json at start, out.jsonl while Claude streams, exit.json then summary.json
+// at the end — summary.status is the same word claude_status reports. Read-only here; any read that
+// fails leaves the last good state. Jobs are machine-wide (every session and profile shares the one
+// Claude account), so this block is too.
+const CLAUDE_JOBS = `${process.env.CLAUDE_SUB_HOME?.trim() || `${process.env.HOME}/.cache/claude-sub`}/jobs`
+const CLAUDE_ID = /^\d{8}-\d{6}-[0-9a-f]{6}$/
+const CLAUDE_KEEP = 8 // newest job dirs read per poll
+const CLAUDE_HISTORY_S = 24 * 3600 // finished jobs older than a day leave the history
+const CLAUDE_BUSY_MS = 1_000
+const CLAUDE_IDLE_MS = 4_000
+const CLAUDE_SETTLE_S = 5 // exit.json without summary.json yet: the runner is still writing it
+const CLAUDE_LIVE = new Set(['starting', 'running', 'cancelling'])
+const claude = (globalThis.__hyClaudeState ??= { flash: null, jobs: [], prog: new Map(), rev: 0, sig: '', started: false, timer: null })
+// A state object left by another build of this widget may lack a field: fill it in, never crash the poller.
+claude.prog ??= new Map()
+claude.jobs ??= []
+claude.rev ??= 0
+
+const readJson = (fs, p) => {
+  try {
+    return JSON.parse(fs.readFileSync(p, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+const pidAlive = pid => {
+  if (!pid) {
+    return false
+  }
+
+  try {
+    process.kill(Number(pid), 0)
+
+    return true
+  } catch (e) {
+    return e?.code === 'EPERM'
+  }
+}
+
+// What a tool call works on, in a few words: the file for edits and reads, the command for Bash, the
+// pattern for searches, the URL for fetches.
+function toolTarget(input) {
+  const a = input && typeof input === 'object' ? input : {}
+  const file = a.file_path ?? a.notebook_path ?? a.path
+
+  if (typeof file === 'string' && file) {
+    return file.split('/').filter(Boolean).slice(-2).join('/')
+  }
+
+  const v = a.command ?? a.pattern ?? a.url ?? a.query ?? a.description ?? a.prompt
+
+  return typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, 120) : ''
+}
+
+// What a job did so far, read incrementally from its stream (only the new bytes each poll, so turn and
+// denial counts stay exact on long jobs): assistant turns, the last tool it called, scope-gate denials.
+function claudeProgress(fs, id, dir) {
+  let st = claude.prog.get(id) ?? { denials: 0, lastDenial: '', off: 0, rest: '', say: '', target: '', tool: '', turns: 0 }
+  let fd
+
+  try {
+    fd = fs.openSync(`${dir}/out.jsonl`, 'r')
+    const size = fs.fstatSync(fd).size
+
+    if (size < st.off) {
+      st = { denials: 0, lastDenial: '', off: 0, rest: '', say: '', target: '', tool: '', turns: 0 } // rewritten: start over
+    }
+
+    const len = Math.min(size - st.off, 4 << 20)
+
+    if (len > 0) {
+      const buf = Buffer.alloc(len)
+      const got = fs.readSync(fd, buf, 0, len, st.off)
+      const lines = (st.rest + buf.toString('utf8', 0, got)).split('\n')
+
+      st.off += got
+      st.rest = lines.pop() ?? '' // a line Claude is still writing
+
+      for (const line of lines) {
+        let ev
+
+        try {
+          ev = JSON.parse(line)
+        } catch {
+          continue
+        }
+
+        if (ev?.type === 'assistant') {
+          st.turns++
+
+          for (const part of ev.message?.content ?? []) {
+            if (part?.type === 'tool_use') {
+              st.tool = String(part.name ?? '')
+              st.target = toolTarget(part.input)
+            } else if (part?.type === 'text' && String(part.text ?? '').trim()) {
+              st.say = String(part.text).replace(/\s+/g, ' ').trim().slice(0, 300)
+            }
+          }
+        } else if (ev?.type === 'user') {
+          for (const part of ev.message?.content ?? []) {
+            let text = part?.content
+
+            if (Array.isArray(text)) {
+              text = text.map(x => x?.text ?? '').join(' ')
+            }
+
+            if (typeof text === 'string' && text.includes('[scope-gate]')) {
+              st.denials++
+              st.lastDenial = text.trim()
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    // no stream yet (job just created) or unreadable: keep what we had
+  } finally {
+    if (fd != null) {
+      try {
+        fs.closeSync(fd)
+      } catch {}
+    }
+  }
+
+  claude.prog.set(id, st)
+
+  return st
+}
+
+// One job → { id, status, task, startedAt, endedAt, elapsed, turns, tool, files, denials, lastDenial }.
+// Status words and rules are claude-sub's own (server.py summarize): summary.json when it exists,
+// else exit.json (+ cancelled marker), else the runner's pid decides running vs lost.
+function readClaudeJob(fs, id) {
+  const dir = `${CLAUDE_JOBS}/${id}`
+  const meta = readJson(fs, `${dir}/meta.json`)
+
+  if (!meta) {
+    return null
+  }
+
+  const nowS = Date.now() / 1000
+  const base = {
+    effort: String(meta.effort ?? ''),
+    id,
+    model: String(meta.model ?? ''),
+    resume: Boolean(meta.resume),
+    startedAt: Number(meta.started_at || meta.created_at || 0),
+    task: String(meta.task_head ?? '').replace(/\s+/g, ' ').trim()
+  }
+  const sum = readJson(fs, `${dir}/summary.json`)
+
+  if (sum?.status) {
+    claude.prog.delete(id)
+
+    return {
+      ...base,
+      denials: Number(sum.denials) || 0,
+      elapsed: Number(sum.elapsed_s) || 0,
+      endedAt: Number(sum.ended_at) || 0,
+      files: Number(sum.files) || 0,
+      lastDenial: String(sum.last_denial ?? ''),
+      say: String(sum.result_head ?? '').replace(/\s+/g, ' ').trim(),
+      status: String(sum.status),
+      turns: Number(sum.turns) || 0
+    }
+  }
+
+  const cancelled = fs.existsSync(`${dir}/cancelled`)
+  const exit = readJson(fs, `${dir}/exit.json`)
+  const p = claudeProgress(fs, id, dir)
+  const prog = { denials: p.denials, lastDenial: p.lastDenial, say: p.say, target: p.target, tool: p.tool, turns: p.turns }
+
+  if (exit && nowS - Number(exit.ended_at || 0) >= CLAUDE_SETTLE_S) {
+    // Finished without a summary (claude-sub before 0.2, or the summary failed): the same rules,
+    // minus the usage-limit check, which needs the result text.
+    const status = cancelled ? 'cancelled' : exit.timed_out ? 'timeout' : exit.code === 0 ? 'done' : 'error'
+
+    return { ...base, ...prog, elapsed: Number(exit.elapsed_s) || 0, endedAt: Number(exit.ended_at) || 0, status }
+  }
+
+  if (exit || pidAlive(meta.runner_pid)) {
+    return { ...base, ...prog, status: cancelled ? 'cancelling' : 'running' }
+  }
+
+  if (!meta.runner_pid && nowS - Number(meta.created_at || 0) < 15) {
+    return { ...base, ...prog, status: 'starting' }
+  }
+
+  return { ...base, ...prog, status: 'lost' }
+}
+
+function startClaude() {
+  if (claude.started) {
+    return
+  }
+
+  claude.started = true
+
+  const fs = process.getBuiltinModule?.('node:fs')
+
+  if (!fs) {
+    return
+  }
+
+  const run = () => {
+    let busy = false
+
+    try {
+      const ids = fs.existsSync(CLAUDE_JOBS)
+        ? fs.readdirSync(CLAUDE_JOBS).filter(n => CLAUDE_ID.test(n)).sort().slice(-CLAUDE_KEEP).reverse()
+        : []
+      const jobs = ids.map(id => readClaudeJob(fs, id)).filter(Boolean)
+
+      busy = jobs.some(j => CLAUDE_LIVE.has(j.status))
+
+      const sig = JSON.stringify(jobs.map(j => [j.id, j.status, j.turns, j.tool, j.target, j.say, j.denials]))
+
+      if (sig !== claude.sig) {
+        // A job that just finished flashes for FLASH_MS (green when done, red otherwise).
+        for (const j of jobs) {
+          const was = claude.jobs.find(x => x.id === j.id)
+
+          if (was && CLAUDE_LIVE.has(was.status) && !CLAUDE_LIVE.has(j.status)) {
+            claude.flash = { id: j.id, until: Date.now() + FLASH_MS }
+            flashUntil = Math.max(flashUntil, Date.now() + FLASH_MS)
+          }
+        }
+
+        claude.jobs = jobs
+        claude.sig = sig
+        claude.rev++
+      }
+
+      for (const id of claude.prog.keys()) {
+        if (!ids.includes(id)) {
+          claude.prog.delete(id)
+        }
+      }
+    } catch {
+      // keep the last good state
+    }
+
+    claude.timer = setTimeout(run, busy ? CLAUDE_BUSY_MS : CLAUDE_IDLE_MS)
+    claude.timer.unref?.()
+  }
+
+  run()
+}
 
 function startLoader() {
   if (loader.started) {
@@ -442,6 +743,7 @@ function routeStates() {
 }
 
 globalThis.__hyRouteStates = routeStates
+globalThis.__hyProviderLines = providerLines
 globalThis.__hyRouteOf = routeOf
 
 // Section folding: key → collapsed? Only a header click folds a section; nothing folds by itself.
@@ -467,6 +769,7 @@ export default function register(sdk) {
   const h = sdk.h ?? React.createElement
   const { useEffect, useRef, useState } = React
   const W = WIDTH - 2
+  const EDGE = '\u258c' // ▌ a row's coloured edge (claude block, provider lines — same as the dock)
 
   // ── helpers ────────────────────────────────────────────────────────────
   const fit = (s, w) => {
@@ -548,6 +851,16 @@ export default function register(sdk) {
   }
 
   const ago = sec => (sec ? dur(Date.now() - sec * 1000) : '')
+  // "now", "5m", "3h" — how long ago a history row's job ended.
+  const agoShort = sec => {
+    if (!sec) {
+      return ''
+    }
+
+    const d = Math.max(0, Date.now() / 1000 - sec)
+
+    return d < 60 ? 'now' : d < 3600 ? `${Math.floor(d / 60)}m` : `${Math.floor(d / 3600)}h`
+  }
 
   const tilde = p => {
     const home = process.env.HOME
@@ -636,7 +949,7 @@ export default function register(sdk) {
     return onToggle ? h(Box, { onClick: onToggle }, line) : line
   }
 
-  const Row = ({ c, mark, markColor, text, color, right, rightColor, dim, bold, glowNow, strike }) => {
+  const Row = ({ c, edge, mark, markColor, text, color, right, rightColor, dim, bold, glowNow, strike }) => {
     const r = right ? ` ${right}` : ''
     const room = Math.max(4, W - 3 - r.length)
     const body = fit(text, room)
@@ -644,7 +957,8 @@ export default function register(sdk) {
     return h(
       Text,
       { wrap: 'truncate-end' },
-      h(Text, { color: markColor }, ` ${mark} `),
+      edge ? h(Text, { color: edge }, EDGE) : h(Text, null, ' '),
+      h(Text, { color: markColor }, `${mark} `),
       glowNow != null
         ? h(Glow, { base: color, bold, glow: '#FFFFFF', now: glowNow, text: body })
         : h(Text, { bold, color, dimColor: dim, strikethrough: strike }, body),
@@ -652,6 +966,20 @@ export default function register(sdk) {
       r ? h(Text, { color: rightColor ?? c.dim }, r) : null
     )
   }
+
+  // A rounded pill (Nerd Font caps, like hy-tabs and the dock): ( text ). Width = text + 2.
+  const Pill = ({ bg, bold = true, fg, text }) =>
+    h(
+      Text,
+      null,
+      h(Text, { color: bg }, '\u{e0b6}'),
+      h(Text, { backgroundColor: bg, bold, color: fg }, text),
+      h(Text, { color: bg }, '\u{e0b4}')
+    )
+
+  // An edged line (the say / denial / goal lines under a row): coloured edge, then the text.
+  const Edged = ({ edge, color, italic, key, text }) =>
+    h(Text, { key, wrap: 'truncate-end' }, h(Text, { color: edge }, EDGE), h(Text, { color, italic }, text))
 
   const Chips = ({ items }) =>
     h(
@@ -755,6 +1083,7 @@ export default function register(sdk) {
       }
 
       startLoader()
+      startClaude()
 
       // Store events (every streamed token) and the animation clock share ONE tick: a repaint that
       // just happened satisfies both, so the panel never paints more than once per ANIM_MS.
@@ -775,16 +1104,19 @@ export default function register(sdk) {
       const offUi = b.ui.listen(bump)
       const offAgents = b.agents?.listen?.(bump)
       let lastData = null
+      let lastClaude = -1
       const clock = setInterval(() => {
         const ui = b.ui.get()
         const turn = b.turn.get()
         const anim =
-          ui.busy || Date.now() < flashUntil || (turn.tools ?? []).length || subsOf(turn).some(inFlight)
+          ui.busy || Date.now() < flashUntil || (turn.tools ?? []).length || subsOf(turn).some(inFlight) ||
+          claude.jobs.some(j => CLAUDE_LIVE.has(j.status))
 
-        const fresh = globalThis.__hyData?.data !== lastData
+        const fresh = globalThis.__hyData?.data !== lastData || claude.rev !== lastClaude
 
         if ((anim && !pending && Date.now() - lastPaint >= ANIM_MS - 10) || fresh) {
           lastData = globalThis.__hyData?.data
+          lastClaude = claude.rev
           paint()
         }
       }, ANIM_MS)
@@ -1283,9 +1615,202 @@ export default function register(sdk) {
       )
     }
 
+    // ── claude-sub block (pinned in the footer, under the cwd line) ──
+    // Lit while Claude Code works (pulsing chip, glowing row, turns · last tool · time); a job that just
+    // ended flashes green/red; history of the last day with each outcome; a scope-gate denial in red.
+    const claudeParts = (() => {
+      const jobs = claude.jobs
+      const nowS = now / 1000
+      const live = jobs.filter(j => CLAUDE_LIVE.has(j.status))
+      const hist = jobs.filter(j => !CLAUDE_LIVE.has(j.status) && nowS - (j.endedAt || j.startedAt) < CLAUDE_HISTORY_S)
+      const histMax = 3
+      const parts = { deny: null, head: null, hist: [], live: [], prov: [], say: null }
+      const flashing = claude.flash && now < claude.flash.until ? jobs.find(j => j.id === claude.flash.id) : null
+      const OUTCOME = {
+        cancelled: { color: c.dim, label: 'cancelled', mark: '⊘' },
+        done: { color: c.green, label: '', mark: '✓' },
+        error: { color: c.red, label: 'error', mark: '×' },
+        lost: { color: c.red, label: 'lost', mark: '?' },
+        rate_limited: { color: c.yellow, label: 'limit', mark: '◔' },
+        timeout: { color: c.orange, label: 'timeout', mark: '◷' }
+      }
+      const outcome = st => OUTCOME[st] ?? { color: c.dim, label: st, mark: '·' }
+      const todayN = hist.length
+      const deniedN = jobs.reduce((n, j) => n + (nowS - (j.endedAt || j.startedAt || nowS) < CLAUDE_HISTORY_S ? j.denials : 0), 0)
+      let chip
+      let tail = ''
+      let tailColor = c.dim
+
+      // Which Claude: model · effort of the newest job (claude-sub's own settings, so a change shows up).
+      const top = live[0] ?? jobs[0]
+      const who = top?.model ? `${top.model.replace(/^claude-/, '')}${top.effort ? `·${top.effort}` : ''}` : ''
+
+      if (live.length) {
+        const j = live[0]
+        const startMs = j.startedAt ? j.startedAt * 1000 : now
+
+        chip = { bg: Math.floor(now / 300) % 2 ? c.orange : c.yellow, fg: c.deeper, text: `${spin} claude` }
+        tail = [who, dur(now - startMs), live.length > 1 ? `${live.length} jobs` : j.status === 'cancelling' ? 'cancelling' : j.status === 'starting' ? 'starting' : '']
+          .filter(Boolean).join(' · ')
+        tailColor = c.orange
+      } else if (flashing) {
+        const o = outcome(flashing.status)
+
+        chip = { bg: flashing.status === 'done' ? c.green : o.color, fg: c.deeper, text: `${o.mark} claude` }
+        tail = [who, flashing.status === 'done' ? 'done' : o.label].filter(Boolean).join(' · ')
+        tailColor = o.color
+      } else {
+        chip = { bg: c.surface, fg: c.idle, text: '✻ claude' }
+        tail = [who, todayN ? `${todayN} today` : 'idle'].filter(Boolean).join(' · ')
+      }
+
+      parts.head = (
+        h(
+          Text,
+          { key: 'cl-h', wrap: 'truncate-end' },
+          h(Pill, { bg: chip.bg, fg: chip.fg, text: chip.text }),
+          h(Text, { color: tailColor }, ` ${fit(tail, W - chip.text.length - 4 - (deniedN ? 4 : 0))}`),
+          deniedN ? h(Text, { bold: true, color: c.red }, ` ✗${deniedN}`) : null
+        )
+      )
+
+      // Live jobs: the task, then what Claude is doing right now (tool → its file / command / pattern)
+      // and, for the first job, the last thing it said — so a working Claude is visibly working.
+      // Each live line carries a rank for shedding: 0 the task, 1 what it is doing, 2 its last words.
+      live.slice(0, 2).forEach((j, i) => {
+        parts.live.push(
+          { rank: 0, node: h(Row, {
+            bold: true,
+            c,
+            color: c.fg,
+            edge: c.orange,
+            glowNow: now,
+            key: `cl-l${j.id}`,
+            mark: spin,
+            markColor: c.orange,
+            right: `${j.resume ? '↻ ' : ''}${j.denials ? `✗${j.denials} ` : ''}`.trim(),
+            rightColor: j.denials ? c.red : c.comment,
+            text: j.task || j.id
+          }) }
+        )
+
+        const doing = j.tool ? `${j.tool}${j.target ? ` ${j.target}` : ''}` : j.status === 'starting' ? 'starting Claude Code…' : 'thinking…'
+
+        parts.live.push({
+          rank: 1,
+          node: h(Row, { c, color: c.orange, edge: c.orange, key: `cl-a${j.id}`, mark: '›', markColor: c.orange, right: j.turns ? `turn ${j.turns}` : '', rightColor: c.comment, text: doing })
+        })
+
+        if (i === 0 && j.say) {
+          parts.live.push({ rank: 2, node: h(Edged, { color: c.dim, edge: c.orange, italic: true, key: `cl-s${j.id}`, text: `  “${fit(j.say, W - 6)}”` }) })
+        }
+      })
+
+      // The job that just ended: what Claude reported (first words of its result).
+      const ended = flashing ?? (hist[0] && nowS - hist[0].endedAt < 120 ? hist[0] : null)
+
+      if (!live.length && ended?.say) {
+        parts.say = h(Edged, { color: c.dim, edge: outcome(ended.status).color, italic: true, key: 'cl-r', text: `  “${fit(ended.say, W - 6)}”` })
+      }
+
+      // Other providers the routes run on (Coarena for researcher today): model(s) and routes read from
+      // the configs, lit while one of those routes works, with the goal it is working on.
+      for (const g of globalThis.__hyProviderLines?.() ?? []) {
+        const on = g.state === 'active'
+        const gchip = on
+          ? { bg: Math.floor(now / 300) % 2 ? c.purple : c.cyan, fg: c.deeper, text: `${spin} ${g.label}` }
+          : g.state === 'done'
+            ? { bg: c.line, fg: c.green, text: `✓ ${g.label}` }
+            : g.state === 'failed'
+              ? { bg: c.line, fg: c.red, text: `× ${g.label}` }
+              : { bg: c.surface, fg: c.idle, text: `◇ ${g.label}` }
+
+        parts.prov.push(
+          h(
+            Text,
+            { key: `pv-${g.provider}`, wrap: 'truncate-end' },
+            h(Pill, { bg: gchip.bg, fg: gchip.fg, text: gchip.text }),
+            h(Text, { bold: on, color: on ? c.fg : c.dim }, ` ${fit(g.models.join(', '), W - gchip.text.length - 4)}`),
+            h(Text, { color: c.comment }, fit(` · ${g.routes.join(', ')}`, Math.max(0, W - gchip.text.length - 4 - g.models.join(', ').length - 1)))
+          )
+        )
+
+        if (on) {
+          const sub = subs.find(x => inFlight(x) && g.routes.includes(routeOf(x.goal, data, x.model) ?? ''))
+
+          if (sub?.goal) {
+            parts.prov.push(h(Edged, { color: c.purple, edge: c.purple, key: `pv-g${g.provider}`, text: `› ${fit(sub.goal, W - 5)}` }))
+          }
+        }
+      }
+
+      for (const j of hist.slice(0, histMax)) {
+        const o = outcome(j.status)
+        const flash = flashing?.id === j.id
+
+        parts.hist.push(
+          h(Row, {
+            bold: flash,
+            c,
+            color: flash ? c.fg : c.dim,
+            edge: o.color,
+            key: `cl-d${j.id}`,
+            mark: o.mark,
+            markColor: o.color,
+            // ✗N denials · outcome word (how long it ran, for done) · how long ago it ended
+            right: [j.denials ? `✗${j.denials}` : '', o.label || (j.elapsed ? dur(j.elapsed * 1000) : ''), agoShort(j.endedAt || j.startedAt)]
+              .filter(Boolean).join(' · '),
+            rightColor: j.denials || j.status === 'error' || j.status === 'lost' ? c.red : c.comment,
+            text: j.task || j.id
+          })
+        )
+      }
+
+      // The newest job that was refused something: what the guard said (rule · path), in red.
+      const refused = [...live, ...hist.slice(0, histMax)].find(j => j.denials && j.lastDenial)
+
+      if (refused) {
+        const why = refused.lastDenial.replace(/^.*?\[scope-gate\]\s*(stopped:\s*)?/, '').replace(/\s+—.*$/, '')
+
+        parts.deny = h(Edged, { color: c.red, edge: c.red, key: 'cl-x', text: `✗ ${fit(why, W - 4)}` })
+      }
+
+      return parts
+    })()
+
+    const cp = claudeParts
+    const claudeFull = 1 + cp.live.length + cp.prov.length + cp.hist.length + (cp.deny ? 1 : 0) + (cp.say ? 1 : 0)
+    // At most n lines, kept by priority — header, the live tasks, the denial line, what each live job
+    // is doing, the other providers, Claude's last words, the last result, history (oldest goes first) —
+    // and shown in reading order: Claude first, the other providers under it.
+    const claudeBlock = n => {
+      let room = Math.max(0, n - 1)
+      const take = list => {
+        const got = list.slice(0, Math.max(0, room))
+        room -= got.length
+
+        return got
+      }
+      const kept = new Set()
+      const keep = list => take(list).forEach(x => kept.add(x))
+
+      keep(cp.live.filter(x => x.rank === 0))
+      const deny = take(cp.deny ? [cp.deny] : [])
+      keep(cp.live.filter(x => x.rank === 1))
+      const prov = take(cp.prov)
+      keep(cp.live.filter(x => x.rank === 2))
+      const say = take(cp.say ? [cp.say] : [])
+      const hist = take(cp.hist)
+      const live = cp.live.filter(x => kept.has(x)).map(x => x.node)
+
+      return [cp.head, ...live, ...say, ...hist, ...deny, ...prov]
+    }
+
     // Fit the rail: drop whole sections from the bottom (files, MCP, skills …) until the rest and
-    // the 3-line footer fit; the title block, TODO and SUBAGENTS come first and stay longest.
-    const FOOT = 3
+    // the footer (cwd, the claude block, the hint line) fit; the title block, TODO and SUBAGENTS come
+    // first and stay longest.
+    let claudeN = Math.min(claudeFull, Math.max(1, Math.floor(rows / 3)))
+    let FOOT = 3 + claudeN
 
     while (used + FOOT > rows && nodes.length > 1) {
       const lines = nodeLines.pop()
@@ -1303,13 +1828,37 @@ export default function register(sdk) {
       }
     }
 
+    // Still too tall with only the title block left (a very short rail): the claude block shrinks
+    // toward its header line before the footer gives up.
+    if (used + FOOT > rows) {
+      claudeN = Math.max(1, rows - used - 3)
+      FOOT = 3 + claudeN
+    }
+
     const footOn = used + FOOT <= rows
+
+    // Room to spare on a measured rail (it runs the full height of the screen): the claude block
+    // takes what it can still show, and the footer sits at the bottom of the rail.
+    let footGap = 0
+
+    if (footOn && railH > 0) {
+      const grow = Math.min(rows - used - FOOT, claudeFull - claudeN)
+
+      if (grow > 0) {
+        claudeN += grow
+        FOOT += grow
+      }
+
+      footGap = Math.max(0, rows - used - FOOT)
+    }
+
+    const claudeRows = claudeBlock(claudeN)
 
     // ── pinned footer: cwd · branch ──
     footOn && nodes.push(
       h(
         Box,
-        { flexDirection: 'column', flexShrink: 0, key: 'foot', marginTop: 1 },
+        { flexDirection: 'column', flexShrink: 0, key: 'foot', marginTop: 1 + footGap },
         info.cwd
           ? h(
               Text,
@@ -1318,6 +1867,7 @@ export default function register(sdk) {
               info.branch ? h(Text, { color: c.accent }, `  ${IC.branch} ${fit(info.branch, 12)}`) : null
             )
           : null,
+        ...claudeRows,
         h(Text, { color: c.comment }, '/hy-sidebar · ^X sessions · /hy-tabs')
       )
     )
@@ -1386,6 +1936,7 @@ export default function register(sdk) {
     const boot = () => {
       if (bridge()) {
         startLoader() // tabs use the data even with the sidebar closed
+        startClaude() // the powerline's claude cell reads it while the sidebar is closed
 
         if (process.env.HY_SIDEBAR !== '0') {
           sync()

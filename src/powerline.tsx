@@ -89,6 +89,8 @@ function plLoadConf(): PlConf {
 }
 
 const PL_CONF = plLoadConf()
+// Shared with the restyled dock (src/dock.tsx, another file of the build): same icon choice as the bar.
+;(globalThis as { __plIcons?: boolean }).__plIcons = PL_CONF.icons
 // Glyphs whose width Ink and terminals agree on (1 cell). U+26A0 ⚠ / U+26D3 ⛓
 // measure 2 in Ink but draw as 1 in Terminal.app/tmux, which shifts every cell
 // after them and garbles Ink's incremental repaints.
@@ -108,7 +110,7 @@ interface PlSeg {
   render?: (bg: string) => ReactNode
   /** Grey palette only: alarm / accent text instead of plain ink. */
   tone?: __PlTone
-  /** Keep bg/fg as given even on the grey ramp (alarms must stay red). */
+  /** Accent cell: its own colours on colour palettes; on the grey ramp it takes the ramp grey and its colour becomes the bold text colour (alarms stay red, as text). */
   fixed?: boolean
   /** Idle/secondary cell: dim text, also under the mono palette. */
   muted?: boolean
@@ -420,6 +422,96 @@ type __PlStore = { listen?: (cb: () => void) => () => void }
 
 const PL_TASK_IN_FLIGHT = new Set(['dispatched', 'finalizing', 'queued', 'running'])
 
+// ── claude-sub + provider cells ──
+// Claude Code (the coder route's hand, run by the claude-sub MCP server) at work: lit while a job runs
+// (pulsing orange, spinner, time, ✗N for scope-gate denials) with a running-text line of what it does
+// right now (tool → file / command, turn, its last words) when the row has room; a 4 s green/red flash
+// when a job ends; hidden when idle. Next to it, a cell per other provider (Coarena) while one of its
+// routes works, with the model read from the configs. Shown with or without the hy sidebar: the bar is
+// the one place always on screen. State comes from the sidebar widget's poller and config read
+// (globalThis.__hyClaudeState, __hyProviderLines) — one reader, so bar and rail never disagree; no
+// widget, no cells. HERMES_POWERLINE_CLAUDE=0 hides them.
+interface PlClaudeJob {
+  denials: number
+  effort?: string
+  id: string
+  model?: string
+  say?: string
+  startedAt: number
+  status: string
+  target?: string
+  tool: string
+  turns: number
+}
+
+/** A provider other than main's that route profiles run on (Coarena today), from the sidebar's config read. */
+interface PlProvider {
+  label: string
+  models: string[]
+  provider: string
+  routes: string[]
+  state: string
+}
+
+interface PlClaude {
+  denials: number
+  flash: null | string
+  live: PlClaudeJob[]
+  prov: PlProvider[]
+}
+
+const PL_CLAUDE_LIVE = new Set(['cancelling', 'running', 'starting'])
+const PL_CLAUDE_SPIN = ['\u280b', '\u2819', '\u2839', '\u2838', '\u283c', '\u2834', '\u2826', '\u2827', '\u2807', '\u280f']
+
+function usePlClaude(): null | PlClaude {
+  const [state, setState] = useState<null | PlClaude>(null)
+
+  useEffect(() => {
+    if (process.env.HERMES_POWERLINE_CLAUDE === '0') {
+      return
+    }
+
+    let rev = -1
+    let shown = false
+
+    const tick = () => {
+      try {
+        const g = (globalThis as {
+          __hyClaudeState?: { flash: null | { id: string; until: number }; jobs: PlClaudeJob[]; rev: number }
+        }).__hyClaudeState
+
+        if (!g) {
+          return
+        }
+
+        const live = g.jobs.filter(j => PL_CLAUDE_LIVE.has(j.status))
+        const flashJob = g.flash && Date.now() < g.flash.until ? g.jobs.find(j => j.id === g.flash!.id) : undefined
+        const lines = (globalThis as { __hyProviderLines?: () => PlProvider[] }).__hyProviderLines
+        const prov = (lines?.() ?? []).filter(x => x.state === 'active')
+        const on = live.length > 0 || !!flashJob || prov.length > 0
+
+        // While something runs, every tick repaints (spinner, clock, running text); otherwise only real changes do.
+        if (on || shown || g.rev !== rev) {
+          rev = g.rev
+          shown = on
+          setState(on ? { denials: live.reduce((n, j) => n + (j.denials || 0), 0), flash: flashJob?.status ?? null, live, prov } : null)
+        }
+      } catch {
+        // a widget mid-reload: keep the last state
+      }
+    }
+
+    const timer = setInterval(tick, 300) // the running text steps one cell per tick
+
+    timer.unref?.()
+    tick()
+
+    return () => clearInterval(timer)
+  }, [])
+
+  return state
+}
+
 function usePlTasks(): null | PlTasks {
   const [tasks, setTasks] = useState<null | PlTasks>(null)
 
@@ -626,81 +718,6 @@ function usePlGit(): null | PlGit {
   }, [])
 
   return git
-}
-
-// ── Coarena daily quota cell ──
-// The coder route runs on Coarena's free tier (a $/day budget). GET /api/v1/usage every
-// 5 min with COARENA_API_KEY (env, else $HERMES_HOME/.env); no key, any error or
-// HERMES_POWERLINE_QUOTA=0 → the cell hides. Read-only; the key never leaves this request.
-interface PlQuota {
-  limit: number
-  refused: number
-  spent: number
-}
-
-const plCoarenaKey = (): string => {
-  const fromEnv = process.env.COARENA_API_KEY?.trim()
-
-  if (fromEnv) {
-    return fromEnv
-  }
-
-  try {
-    const home = process.env.HERMES_HOME?.trim() || __plJoin(__plHomedir(), '.hermes')
-    const m = __plReadFileSync(__plJoin(home, '.env'), 'utf8').match(/^COARENA_API_KEY=["']?([^"'\s]+)/m)
-
-    return m?.[1] ?? ''
-  } catch {
-    return ''
-  }
-}
-
-function usePlQuota(): null | PlQuota {
-  const [quota, setQuota] = useState<null | PlQuota>(null)
-
-  useEffect(() => {
-    const key = process.env.HERMES_POWERLINE_QUOTA === '0' ? '' : plCoarenaKey()
-
-    if (!key) {
-      return
-    }
-
-    let alive = true
-    let timer: ReturnType<typeof setTimeout> | undefined
-
-    const run = async () => {
-      try {
-        const res = await fetch('https://coarena.ai/api/v1/usage', {
-          headers: { Authorization: `Bearer ${key}` },
-          signal: AbortSignal.timeout(8_000)
-        })
-        const j = (await res.json()) as {
-          data?: { limits?: { usd_per_day?: number }; today?: { quota_refusals?: number; spent_usd?: number } }
-        }
-        const spent = Number(j.data?.today?.spent_usd)
-        const limit = Number(j.data?.limits?.usd_per_day)
-
-        if (alive && Number.isFinite(spent) && limit > 0) {
-          setQuota({ limit, refused: Number(j.data?.today?.quota_refusals) || 0, spent })
-        }
-      } catch {
-        // offline / API change → keep the last value (or stay hidden)
-      }
-
-      if (alive) {
-        timer = setTimeout(() => void run(), 5 * 60_000)
-      }
-    }
-
-    timer = setTimeout(() => void run(), 3_000)
-
-    return () => {
-      alive = false
-      clearTimeout(timer)
-    }
-  }, [])
-
-  return quota
 }
 
 const PL_ERR_SHORT: Record<string, string> = {
@@ -927,6 +944,29 @@ function PlDuration({ bg, fg, icon, startedAt }: { bg: string; fg: string; icon:
 }
 
 // Keep the head of `s` within `w` cells ("Add rate limit to…").
+/** A window of `width` cells sliding along `s` (wraps with a gap), for text longer than its room. */
+const plMarquee = (s: string, width: number): string => {
+  const chars = [...`${s}   \u00b7   `]
+  const off = Math.floor(Date.now() / 300) % chars.length
+  const loop = [...chars.slice(off), ...chars.slice(0, off)]
+  let out = ''
+  let w = 0
+
+  for (const ch of loop) {
+    const cw = stringWidth(ch)
+
+    if (w + cw > width) {
+      break
+    }
+
+    out += ch
+    w += cw
+  }
+
+  // Always exactly `width` cells (a wide glyph at the edge leaves a gap), so the bar never jitters.
+  return out + ' '.repeat(Math.max(0, width - w))
+}
+
 function plTruncEnd(s: string, w: number): string {
   if (stringWidth(s) <= w) {
     return s
@@ -992,8 +1032,8 @@ function PowerlineRule(p: StatusRuleProps) {
   const inbox = usePlInbox()
   const todos = usePlTodos()
   const tasks = usePlTasks()
+  const claudeSt = usePlClaude()
   const git = usePlGit()
-  const quota = usePlQuota()
   const T = messages()
   const sep = PL_SEPS[PL_CONF.style] ?? PL_SEPS.arrow
   // Icon + gap (2 cells by default, so full-size Nerd Font glyphs have room).
@@ -1108,7 +1148,7 @@ function PowerlineRule(p: StatusRuleProps) {
   const shrink: { seg: PlSeg; short: string; idle: boolean }[] = []
   // Text that rides on a pinned cell only when the row has room for it (claimed after the right
   // block is reserved, before the metrics): the todo step, then the task goal.
-  const grow: { seg: PlSeg; text: string }[] = []
+  const grow: { marquee?: boolean; seg: PlSeg; text: string }[] = []
 
   if (todoOn) {
     const items = (todos?.items ?? []).filter(x => x.status !== 'cancelled')
@@ -1160,6 +1200,60 @@ function PowerlineRule(p: StatusRuleProps) {
 
     if (n > 0 && tasks.goal && !sideOpen) {
       grow.push({ seg, text: tasks.goal })
+    }
+  }
+
+  if (claudeSt) {
+    const icon = PL_CONF.icons ? ic('\u273b') : '* '
+    const spin = PL_CLAUDE_SPIN[Math.floor(Date.now() / 100) % PL_CLAUDE_SPIN.length]
+
+    if (claudeSt.live.length) {
+      const j = claudeSt.live[0]
+      const secs = j.startedAt ? Math.max(0, Math.round(Date.now() / 1000 - j.startedAt)) : 0
+      const clock = secs < 60 ? `${secs}s` : `${Math.floor(secs / 60)}m${String(secs % 60).padStart(2, '0')}`
+      const more = claudeSt.live.length > 1 ? ` \u00d7${claudeSt.live.length}` : ''
+      const denied = claudeSt.denials ? ` \u2717${claudeSt.denials}` : ''
+      const txt = `${icon}claude ${spin} ${clock}${more}${denied}`
+      const seg: PlSeg = {
+        bg: Math.floor(Date.now() / 600) % 2 ? '#FFB86C' : '#F1FA8C',
+        bold: true,
+        fg: dark,
+        fixed: true,
+        key: 'claude',
+        node: txt,
+        w: stringWidth(txt)
+      }
+
+      pinned.push(seg)
+      shrink.push({ idle: false, seg, short: `${icon}${spin}${denied}` })
+
+      const doing = j.tool ? `${j.tool}${j.target ? ` ${j.target}` : ''}` : j.status === 'starting' ? 'starting' : 'thinking'
+      const detail = [doing, j.turns ? `turn ${j.turns}` : '', j.say ? `\u201c${j.say}\u201d` : ''].filter(Boolean).join(' \u00b7 ')
+
+      grow.push({ marquee: true, seg, text: detail })
+    } else if (claudeSt.flash) {
+      const good = claudeSt.flash === 'done'
+      const word = good ? 'done' : claudeSt.flash === 'rate_limited' ? 'limit' : claudeSt.flash
+      const txt = `${good ? '\u2713 ' : '\u00d7 '}claude ${word}`
+
+      pinned.push({ bg: good ? '#50FA7B' : '#FF5555', bold: true, fg: dark, fixed: true, key: 'claude', node: txt, w: stringWidth(txt) })
+    }
+
+    for (const pv of claudeSt.prov) {
+      const pIcon = PL_CONF.icons ? ic('\u25c7') : '<> '
+      const txt = `${pIcon}${pv.label} ${spin} ${pv.models.join(', ')}`
+      const seg: PlSeg = {
+        bg: Math.floor(Date.now() / 600) % 2 ? '#BD93F9' : '#8BE9FD',
+        bold: true,
+        fg: dark,
+        fixed: true,
+        key: `prov-${pv.provider}`,
+        node: txt,
+        w: stringWidth(txt)
+      }
+
+      pinned.push(seg)
+      shrink.push({ idle: false, seg, short: `${pIcon}${spin}` })
     }
   }
 
@@ -1312,19 +1406,6 @@ function PowerlineRule(p: StatusRuleProps) {
     }
   }
 
-  // Coarena budget for today: ink below 50 %, orange to 85 %, red above (or after a refusal).
-  if (quota && sharedW > 0) {
-    const r = quota.spent / quota.limit
-    const txt = ` ${ic('\u{f0584}')}$${quota.spent < 10 ? quota.spent.toFixed(2) : quota.spent.toFixed(1)}/${quota.limit} `
-
-    rCells.push({
-      bg: C.mid,
-      bold: r >= 0.5 || quota.refused > 0,
-      fg: r >= 0.85 || quota.refused > 0 ? '#FF5F5F' : r >= 0.5 ? '#FFAF5F' : mono ? __plInk(C.mid) : C.branch,
-      text: txt
-    })
-  }
-
   // git tree state, right before the clock: ±changed ?untracked !conflicts ↑ahead ↓behind, or ✓.
   if (git && sharedW > 0) {
     const bits = [
@@ -1420,7 +1501,7 @@ function PowerlineRule(p: StatusRuleProps) {
 
     rCells.forEach((c, j) => {
       c.bg = __plEdgeGray(m - 1 - j, m)
-      // keep the quota alarm colours; everything else takes the ramp's ink
+      // keep alarm colours (red/orange); everything else takes the ramp's ink
       c.fg = c.fg === '#FF5F5F' || c.fg === '#FFAF5F' ? c.fg : __plInk(c.bg)
     })
     durBg = __plEdgeGray(0, m)
@@ -1489,10 +1570,13 @@ function PowerlineRule(p: StatusRuleProps) {
       continue
     }
 
-    const room = Math.min(28, budget - 3) // ' · ' joiner
+    const room = Math.min(g.marquee ? 40 : 28, budget - 3) // ' · ' joiner
 
     if (room >= 8) {
-      const extra = ` \u00b7 ${plTruncEnd(g.text, room)}`
+      // Running text: a line longer than the room scrolls through it (≈3 cells/s) instead of being cut.
+      const tw = stringWidth(g.text)
+      const text = g.marquee && tw > room ? plMarquee(g.text, room) : plTruncEnd(g.text, room)
+      const extra = ` \u00b7 ${text}`
       const w = stringWidth(extra)
 
       g.seg.node = `${g.seg.node as string}${extra}`
@@ -1663,10 +1747,18 @@ function PowerlineRule(p: StatusRuleProps) {
   // Display order: pinned essentials, then the tail in budget order.
   const left = [...pinned, ...tail]
 
-  // Grey palette: walk the ramp dark → light, left to right.
+  // Grey palette: walk the ramp dark → light, left to right. Accent cells (fixed: inbox, claude,
+  // provider, API error) take their place on the ramp too, so the chevron chain never breaks into a
+  // coloured rectangle; their colour becomes the (bold) text colour instead of the background.
   if (mono) {
     left.forEach((seg, i) => {
       if (seg.fixed) {
+        const accent = seg.bg
+
+        seg.bg = __plLeftGray(i, left.length)
+        seg.fg = accent && !__plIsLight(seg.bg) ? accent : dark
+        seg.bold = true
+
         return
       }
 

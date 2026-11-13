@@ -40,7 +40,7 @@ put() { # src dst
 }
 
 mkdir -p "$PL" "$BIN"
-for f in powerline.tsx prompt.ts promptPrefix.tsx codeview.tsx bridge.ts; do put "$HERE/src/$f" "$PL/$f"; done
+for f in powerline.tsx prompt.ts promptPrefix.tsx codeview.tsx bridge.ts dock.tsx; do put "$HERE/src/$f" "$PL/$f"; done
 put "$HERE/bin/hermes-powerline" "$BIN/hermes-powerline"
 chmod +x "$HERE/bin/hermes-powerline"
 
