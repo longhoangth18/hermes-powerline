@@ -16,6 +16,10 @@ VERSION="1.0.0"
 HH="${HERMES_HOME:-$HOME/.hermes}"
 REPO="${HERMES_AGENT_DIR:-$HH/hermes-agent}"
 PL="${HERMES_POWERLINE_DIR:-$HH/powerline}"
+# Build and typecheck with the node Hermes itself runs on (its bundled toolchain) when present —
+# a machine without node on PATH can still build, and the bundle matches the runtime.
+_hpl_node="$(ls -d "$HH"/tools/node-*/bin 2>/dev/null | sort -V | tail -1)"
+[ -n "$_hpl_node" ] && [ -x "$_hpl_node/node" ] && PATH="$_hpl_node:$PATH"
 SRC_DIR="${HERMES_POWERLINE_SRC:-$PL}"
 SRC="$SRC_DIR/powerline.tsx"
 CONF="$PL/config.json"
@@ -327,6 +331,8 @@ for l in open(sys.argv[1], encoding="utf-8"):
         spans.append((rel, int(a), int(b)))
     else:
         starts[rel] = int(v)
+patched = set(starts) | {r for r, _, _ in spans}
+rel_of = lambda path: next((r for r in patched if path.endswith("src/" + r)), None)
 ours, bad, total = [], set(), 0
 for line in open(sys.argv[2], encoding="utf-8", errors="replace"):
     m = re.match(r"(.+?)\((\d+),\d+\): error TS\d+", line)
@@ -339,10 +345,19 @@ for line in open(sys.argv[2], encoding="utf-8", errors="replace"):
         if path.endswith("src/" + rel) and n >= start:
             ours.append(f"{rel}: our line {n - start + 1}: {msg}")
             bad.add(rel)
+    hit = False
     for rel, a, b in spans:
         if path.endswith("src/" + rel) and a <= n <= b:
             ours.append(f"{rel}: inserted line {n}: {msg}")
             bad.add(rel)
+            hit = True
+    # Elsewhere in a file we patched: upstream code calling what we replaced (a new parameter, a
+    # changed prop). Hermes typechecks clean, so treat it as ours — stock bar (required piece) or
+    # skip that piece (optional), never a build that silently drops the new argument.
+    if not hit and rel_of(path) and not any(path.endswith("src/" + r) and n >= st for r, st in starts.items()):
+        rel = rel_of(path)
+        ours.append(f"{rel}: upstream line {n} (affected by our change?): {msg}")
+        bad.add(rel)
 open(sys.argv[4], "w", encoding="utf-8").write("\n".join(sorted(bad)) + ("\n" if bad else ""))
 if total == 0 and sys.argv[3] != "0":
     # tsc died without reporting a single type error: it did not really run.
@@ -434,14 +449,29 @@ doctor() {
 }
 
 LOCK="$PL/.lock"
-unlock() { [ -d "$LOCK" ] && rmdir "$LOCK" 2>/dev/null; return 0; }
+LOCK_ID="$$.$RANDOM"
+# Only the owner removes the lock: a waiter that took over a stale lock must never lose it to the
+# previous owner's EXIT trap or to another waiter.
+unlock() {
+  [ "$(cat "$LOCK/owner" 2>/dev/null)" = "$LOCK_ID" ] && rm -f "$LOCK/owner" && rmdir "$LOCK" 2>/dev/null
+  return 0
+}
 lock() { # serialise builds (two windows right after an update)
-  local i
+  local i stale
   mkdir -p "$PL" 2>/dev/null
   for i in $(seq 1 120); do
-    if mkdir "$LOCK" 2>/dev/null; then trap unlock EXIT; return 0; fi
-    # stale lock left by a crashed build (older than 3 min) → take it over
-    [ -n "$(find "$LOCK" -maxdepth 0 -mmin +3 2>/dev/null)" ] && unlock && continue
+    if mkdir "$LOCK" 2>/dev/null; then
+      echo "$LOCK_ID" > "$LOCK/owner"
+      trap unlock EXIT
+      return 0
+    fi
+    # Stale lock left by a crashed build (older than 3 min): move it aside — mv is atomic, so of
+    # two waiters only one wins; the other simply goes round the loop again.
+    if [ -n "$(find "$LOCK" -maxdepth 0 -mmin +3 2>/dev/null)" ]; then
+      stale="$LOCK.stale.$LOCK_ID"
+      mv "$LOCK" "$stale" 2>/dev/null && rm -rf "$stale"
+      continue
+    fi
     sleep 0.5
   done
   return 1
@@ -457,8 +487,10 @@ ensure() {
   if [ -f "$OUT/dist/entry.js" ] && [ "$(cat "$STAMP_FILE" 2>/dev/null)" = "$stamp" ]; then
     echo "$OUT"; return 0
   fi
-  # A failed build for this exact stamp: don't retry on every launch.
-  if [ "$(cat "$PL/.failed-stamp" 2>/dev/null)" = "$stamp" ]; then
+  # A failed build for this exact stamp: don't retry on every launch — but a one-off failure (a
+  # crash, a full disk, a race) must not pin the stock TUI forever: retry after 30 minutes.
+  if [ "$(cat "$PL/.failed-stamp" 2>/dev/null)" = "$stamp" ] \
+     && [ -z "$(find "$PL/.failed-stamp" -mmin +30 2>/dev/null)" ]; then
     say "stock bar: the last powerline build failed for this Hermes version (log: $LOG)"
     say "fix or update hermes-powerline, then: hermes-powerline rebuild   (details: hermes-powerline doctor)"
     return 1

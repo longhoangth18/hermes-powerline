@@ -27,7 +27,9 @@ const WIDTH = 42 // rail columns (paddingX 1 → 40 content), OpenCode's sidebar
 const MIN_COLS = 112
 const DB_IDLE_MS = 15_000
 const DB_BUSY_MS = 2_500
-const ANIM_MS = 120
+// One repaint tick while something works (~5 fps): smooth enough for spinners and glows, and half
+// the CPU of the old 120 ms tick (measured: busy TUI 13 % → widgets were half of it).
+const ANIM_MS = 200
 const FLASH_MS = 4_000
 const SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 
@@ -754,12 +756,19 @@ export default function register(sdk) {
 
       startLoader()
 
+      // Store events (every streamed token) and the animation clock share ONE tick: a repaint that
+      // just happened satisfies both, so the panel never paints more than once per ANIM_MS.
       let pending = null
+      let lastPaint = 0
+      const paint = () => {
+        lastPaint = Date.now()
+        force(n => n + 1)
+      }
       const bump = () => {
         pending ??= setTimeout(() => {
           pending = null
-          force(n => n + 1)
-        }, ANIM_MS)
+          paint()
+        }, Math.max(0, ANIM_MS - (Date.now() - lastPaint)))
       }
 
       const offTurn = b.turn.listen(bump)
@@ -772,9 +781,11 @@ export default function register(sdk) {
         const anim =
           ui.busy || Date.now() < flashUntil || (turn.tools ?? []).length || subsOf(turn).some(inFlight)
 
-        if (anim || globalThis.__hyData?.data !== lastData) {
+        const fresh = globalThis.__hyData?.data !== lastData
+
+        if ((anim && !pending && Date.now() - lastPaint >= ANIM_MS - 10) || fresh) {
           lastData = globalThis.__hyData?.data
-          force(n => n + 1)
+          paint()
         }
       }, ANIM_MS)
 

@@ -56,6 +56,11 @@ function plpConf(): PlpConf {
     conf.on = false
   }
 
+  // Env switches work with or without a (valid) config.json.
+  if (process.env.HERMES_POWERLINE_SYS === '0') {
+    conf.sys = false
+  }
+
   try {
     const home = process.env.HERMES_HOME?.trim() || __plpJoin(__plpHomedir(), '.hermes')
     const path = process.env.HERMES_POWERLINE_CONF?.trim() || __plpJoin(home, 'powerline', 'config.json')
@@ -79,7 +84,7 @@ function plpConf(): PlpConf {
       conf.cap = raw.cap as PlpCap
     }
 
-    if (raw.sys === false || process.env.HERMES_POWERLINE_SYS === '0') {
+    if (raw.sys === false) {
       conf.sys = false
     }
 

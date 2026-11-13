@@ -39,12 +39,19 @@ hermes() {
       continue
     fi
     case "$a" in
-      -z|--oneshot|-h|--help|--version) command hermes "$@"; return ;;
-      -m|--model|--provider|--reasoning|-t|--toolsets|--resume|--in|--skills|-p|--profile|--usage-file|--cpu-profile) skip=1 ;;
+      # Answer-and-exit forms never open the TUI: straight to the binary (no build check).
+      -z|--oneshot|-h|--help|--version|-V|-q|--query|--query-file|-Q|--status|--stop) command hermes "$@"; return ;;
+      -m|--model|--provider|--reasoning|-t|--toolsets|-r|--resume|--in|-s|--skills|-p|--profile|--usage-file|--cpu-profile) skip=1 ;;
       -*) ;;
       *) sub=$a; break ;;
     esac
   done
+
+  # `hermes chat -q …` / `-Q` answers and exits like -z: no TUI, no build check.
+  if [[ $sub == chat ]] && (( ${@[(Ie)-q]} || ${@[(Ie)--query]} || ${@[(Ie)-Q]} || ${@[(Ie)--query-file]} )); then
+    command hermes "$@"
+    return
+  fi
 
   if [[ -n $sub ]] && (( ${_hpl_direct[(Ie)$sub]} )); then
     command hermes "$@"
@@ -54,4 +61,6 @@ hermes() {
 }
 
 # hy = Hermes in YOLO mode through the same build.
-hy() { hermes-powerline run --yolo "$@"; }
+hy() {
+  if (( $+commands[hermes-powerline] )); then hermes-powerline run --yolo "$@"; else command hermes --yolo "$@"; fi
+}

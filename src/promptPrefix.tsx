@@ -11,8 +11,11 @@ import {
   existsSync as __plsExists,
   readdirSync as __plsReaddir,
   readFileSync as __plsRead,
+  renameSync as __plsRename,
   rmSync as __plsRm,
-  statfsSync as __plsStatfs
+  statSync as __plsStat,
+  statfsSync as __plsStatfs,
+  writeFileSync as __plsWrite
 } from 'node:fs'
 import { cpus as __plsCpus, freemem as __plsFreemem, tmpdir as __plsTmpdir, totalmem as __plsTotalmem } from 'node:os'
 import { join as __plsJoin } from 'node:path'
@@ -48,8 +51,11 @@ import {
 // writes to a pipe at all: sh redirects its stdout to a temp FILE. Even if
 // Hermes dies mid-sample (tab closed, SIGHUP), the orphan just finishes
 // writing the file and exits cleanly.
-// After 3 failures in a row we stop calling macmon for good and fall back to
-// node's os counters (CPU + RAM only).
+// After 3 failures in a row we fall back to node's os counters (CPU + RAM only) and
+// try macmon again a minute later.
+// Every open TUI shares ONE sampler: whoever holds hermes-pl-macmon.lock runs macmon
+// into its own temp file and renames it to hermes-pl-macmon.json (atomic); the
+// others read that file while it is fresh — 3 windows no longer mean 3 macmons.
 interface PlSys {
   cpu: number // 0..100
   diskTotal?: number // bytes
@@ -67,6 +73,10 @@ const PLS_MACMON =
     : null
 
 const PLS_OUT = __plsJoin(__plsTmpdir(), `hermes-pl-macmon-${process.pid}.json`)
+const PLS_SHARED = __plsJoin(__plsTmpdir(), 'hermes-pl-macmon.json')
+const PLS_LOCK = __plsJoin(__plsTmpdir(), 'hermes-pl-macmon.lock')
+const PLS_RETRY_MS = 60_000
+let plsRetryAt = 0
 let plsLast: null | PlSys = null
 let plsChild: __PlsChild | null = null
 let plsTimer: null | ReturnType<typeof setInterval> = null
@@ -101,10 +111,78 @@ process.once('exit', () => {
 
   try {
     __plsRm(PLS_OUT, { force: true })
+
+    if (plsOwnsLock()) {
+      __plsRm(PLS_LOCK, { force: true })
+    }
   } catch {
     // best effort
   }
 })
+
+// The shared sample, if another TUI wrote it within the last sampling period.
+function plsSharedFresh(): null | string {
+  try {
+    if (Date.now() - __plsStat(PLS_SHARED).mtimeMs < PLS_EVERY_MS * 1.5) {
+      return __plsRead(PLS_SHARED, 'utf8')
+    }
+  } catch {
+    // no shared sample yet
+  }
+
+  return null
+}
+
+function plsOwnsLock(): boolean {
+  try {
+    return __plsRead(PLS_LOCK, 'utf8').trim() === String(process.pid)
+  } catch {
+    return false
+  }
+}
+
+// One sampler at a time across TUIs. A lock older than 10 s belongs to a dead or stuck sampler.
+function plsTakeLock(): boolean {
+  for (let i = 0; i < 2; i++) {
+    try {
+      __plsWrite(PLS_LOCK, String(process.pid), { flag: 'wx' })
+
+      return true
+    } catch {
+      try {
+        if (Date.now() - __plsStat(PLS_LOCK).mtimeMs > 10_000) {
+          __plsRm(PLS_LOCK, { force: true })
+          continue
+        }
+      } catch {
+        continue
+      }
+
+      return false
+    }
+  }
+
+  return false
+}
+
+function plsParse(out: string): PlSys {
+  const d = JSON.parse(out.trim().split('\n').pop() || '') as {
+    cpu_active_ratio?: number
+    gpu_active_ratio?: number
+    memory?: { ram_total?: number; ram_usage?: number }
+    temp?: { cpu_temp_avg?: number; gpu_temp_avg?: number }
+  }
+
+  const temps = [d.temp?.cpu_temp_avg, d.temp?.gpu_temp_avg].filter((x): x is number => typeof x === 'number' && x > 0)
+
+  return {
+    cpu: 100 * (d.cpu_active_ratio ?? 0),
+    gpu: typeof d.gpu_active_ratio === 'number' ? 100 * d.gpu_active_ratio : undefined,
+    ramTotal: d.memory?.ram_total ?? __plsTotalmem(),
+    ramUsed: d.memory?.ram_usage ?? 0,
+    temp: temps.length ? Math.max(...temps) : undefined
+  }
+}
 
 // Disk: one statfs every 30 s (the data volume on macOS — `/` is the sealed
 // system snapshot). used = total − available, the way Finder counts it.
@@ -214,8 +292,29 @@ function plsTick() {
     return
   }
 
-  if (!PLS_MACMON || plsFails >= 3) {
+  if (!PLS_MACMON || (plsFails >= 3 && Date.now() < plsRetryAt)) {
     plsEmit(plsFallback())
+
+    return
+  }
+
+  // Another TUI sampled a moment ago: use its numbers.
+  const shared = plsSharedFresh()
+
+  if (shared) {
+    try {
+      plsEmit(plsParse(shared))
+
+      return
+    } catch {
+      // half-written or foreign file: sample ourselves below
+    }
+  }
+
+  if (!plsTakeLock()) {
+    // Someone else is sampling right now: keep the last figures — or, on a fresh TUI with none
+    // yet, show os counters (CPU, RAM, disk) until the shared sample lands.
+    plsEmit(plsLast ?? plsFallback())
 
     return
   }
@@ -233,28 +332,33 @@ function plsTick() {
         }
 
         const out = __plsRead(PLS_OUT, 'utf8')
-        const d = JSON.parse(out.trim().split('\n').pop() || '') as {
-          cpu_active_ratio?: number
-          gpu_active_ratio?: number
-          memory?: { ram_total?: number; ram_usage?: number }
-          temp?: { cpu_temp_avg?: number; gpu_temp_avg?: number }
-        }
-
-        const temps = [d.temp?.cpu_temp_avg, d.temp?.gpu_temp_avg].filter(
-          (x): x is number => typeof x === 'number' && x > 0
-        )
+        const sample = plsParse(out)
 
         plsFails = 0
-        plsEmit({
-          cpu: 100 * (d.cpu_active_ratio ?? 0),
-          gpu: typeof d.gpu_active_ratio === 'number' ? 100 * d.gpu_active_ratio : undefined,
-          ramTotal: d.memory?.ram_total ?? __plsTotalmem(),
-          ramUsed: d.memory?.ram_usage ?? 0,
-          temp: temps.length ? Math.max(...temps) : undefined
-        })
+
+        try {
+          __plsRename(PLS_OUT, PLS_SHARED) // publish for the other windows (atomic)
+        } catch {
+          // best effort
+        }
+
+        plsEmit(sample)
       } catch {
         plsFails += 1
+
+        if (plsFails >= 3) {
+          plsRetryAt = Date.now() + PLS_RETRY_MS
+        }
+
         plsEmit(plsFallback())
+      } finally {
+        if (plsOwnsLock()) {
+          try {
+            __plsRm(PLS_LOCK, { force: true })
+          } catch {
+            // best effort
+          }
+        }
       }
     }
   )

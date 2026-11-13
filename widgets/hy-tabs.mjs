@@ -114,7 +114,7 @@ export default function register(sdk) {
           sig = next
           force(n => n + 1)
         }
-      }, 120)
+      }, 200) // ~5 fps while something works; idle ticks only compare a signature
 
       return () => clearInterval(id)
     }, [])

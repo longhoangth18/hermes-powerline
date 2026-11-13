@@ -99,6 +99,7 @@ def _write_files(session_id: str, st: Dict[str, Any]) -> None:
     st["sid"] = sids[0] if sids else None
     data = json.dumps(st, ensure_ascii=False, separators=(",", ":"))
     DIR.mkdir(parents=True, exist_ok=True)
+    _maybe_sweep()
     for key in dict.fromkeys([*sids, session_id]):
         safe = "".join(c for c in key if c.isalnum() or c in "-_.")[:120]
         if not safe:
@@ -225,6 +226,18 @@ def on_api_request_error(**kw: Any) -> None:
         logger.debug("powerline-net: api_request_error failed", exc_info=True)
 
 
+_last_sweep = 0.0
+
+
+def _maybe_sweep() -> None:
+    """A gateway runs for days and loads the plugin once: sweep again at most once an hour."""
+    global _last_sweep
+    now = time.time()
+    if now - _last_sweep > 3600:
+        _last_sweep = now
+        _sweep()
+
+
 def _sweep() -> None:
     """Drop files from sessions idle for more than two days."""
     try:
@@ -240,6 +253,8 @@ def _sweep() -> None:
 
 
 def register(ctx) -> None:
+    global _last_sweep
+    _last_sweep = time.time()
     _sweep()
     ctx.register_hook("post_api_request", on_post_api_request)
     ctx.register_hook("api_request_error", on_api_request_error)
