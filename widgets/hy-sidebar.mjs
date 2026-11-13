@@ -12,6 +12,8 @@
 //   MCP        every server: health dot + word · in use (spinner) · calls this session
 //   FILES      written / patched files
 //   …pinned:   cwd · branch
+//              CLAUDE  claude-sub jobs: lit while Claude Code works, flash on finish, last day's
+//                      history (✓ done × error ◔ limit ◷ timeout ⊘ cancelled ? lost), ✗ denials
 //
 // Data: live TUI stores via globalThis.__hy (bridge.ts); history from state.db
 // (read-only, node:sqlite): skills, delegations (task → route), subagent
@@ -313,6 +315,237 @@ function routesList() {
 // The session the TUI shows right now (stored id first: that is what state.db knows).
 const currentSid = ui => ui?.storedSid || ui?.info?.stored_session_id || ui?.sid || null
 
+// ── claude-sub: Claude Code jobs (the coding hand behind the coder route) ─────────────────────────
+// claude-sub (~/repos/hermes-claude-sub) keeps one dir per job under $CLAUDE_SUB_HOME/jobs (default
+// ~/.cache/claude-sub): meta.json at start, out.jsonl while Claude streams, exit.json then summary.json
+// at the end — summary.status is the same word claude_status reports. Read-only here; any read that
+// fails leaves the last good state. Jobs are machine-wide (every session and profile shares the one
+// Claude account), so this block is too.
+const CLAUDE_JOBS = `${process.env.CLAUDE_SUB_HOME?.trim() || `${process.env.HOME}/.cache/claude-sub`}/jobs`
+const CLAUDE_ID = /^\d{8}-\d{6}-[0-9a-f]{6}$/
+const CLAUDE_KEEP = 8 // newest job dirs read per poll
+const CLAUDE_HISTORY_S = 24 * 3600 // finished jobs older than a day leave the history
+const CLAUDE_BUSY_MS = 1_000
+const CLAUDE_IDLE_MS = 4_000
+const CLAUDE_SETTLE_S = 5 // exit.json without summary.json yet: the runner is still writing it
+const CLAUDE_LIVE = new Set(['starting', 'running', 'cancelling'])
+const claude = (globalThis.__hyClaudeState ??= { flash: null, jobs: [], prog: new Map(), rev: 0, sig: '', started: false, timer: null })
+// A state object left by another build of this widget may lack a field: fill it in, never crash the poller.
+claude.prog ??= new Map()
+claude.jobs ??= []
+claude.rev ??= 0
+
+const readJson = (fs, p) => {
+  try {
+    return JSON.parse(fs.readFileSync(p, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+const pidAlive = pid => {
+  if (!pid) {
+    return false
+  }
+
+  try {
+    process.kill(Number(pid), 0)
+
+    return true
+  } catch (e) {
+    return e?.code === 'EPERM'
+  }
+}
+
+// What a job did so far, read incrementally from its stream (only the new bytes each poll, so turn and
+// denial counts stay exact on long jobs): assistant turns, the last tool it called, scope-gate denials.
+function claudeProgress(fs, id, dir) {
+  let st = claude.prog.get(id) ?? { denials: 0, lastDenial: '', off: 0, rest: '', tool: '', turns: 0 }
+  let fd
+
+  try {
+    fd = fs.openSync(`${dir}/out.jsonl`, 'r')
+    const size = fs.fstatSync(fd).size
+
+    if (size < st.off) {
+      st = { denials: 0, lastDenial: '', off: 0, rest: '', tool: '', turns: 0 } // rewritten: start over
+    }
+
+    const len = Math.min(size - st.off, 4 << 20)
+
+    if (len > 0) {
+      const buf = Buffer.alloc(len)
+      const got = fs.readSync(fd, buf, 0, len, st.off)
+      const lines = (st.rest + buf.toString('utf8', 0, got)).split('\n')
+
+      st.off += got
+      st.rest = lines.pop() ?? '' // a line Claude is still writing
+
+      for (const line of lines) {
+        let ev
+
+        try {
+          ev = JSON.parse(line)
+        } catch {
+          continue
+        }
+
+        if (ev?.type === 'assistant') {
+          st.turns++
+
+          for (const part of ev.message?.content ?? []) {
+            if (part?.type === 'tool_use') {
+              st.tool = String(part.name ?? '')
+            }
+          }
+        } else if (ev?.type === 'user') {
+          for (const part of ev.message?.content ?? []) {
+            let text = part?.content
+
+            if (Array.isArray(text)) {
+              text = text.map(x => x?.text ?? '').join(' ')
+            }
+
+            if (typeof text === 'string' && text.includes('[scope-gate]')) {
+              st.denials++
+              st.lastDenial = text.trim()
+            }
+          }
+        }
+      }
+    }
+  } catch {
+    // no stream yet (job just created) or unreadable: keep what we had
+  } finally {
+    if (fd != null) {
+      try {
+        fs.closeSync(fd)
+      } catch {}
+    }
+  }
+
+  claude.prog.set(id, st)
+
+  return st
+}
+
+// One job → { id, status, task, startedAt, endedAt, elapsed, turns, tool, files, denials, lastDenial }.
+// Status words and rules are claude-sub's own (server.py summarize): summary.json when it exists,
+// else exit.json (+ cancelled marker), else the runner's pid decides running vs lost.
+function readClaudeJob(fs, id) {
+  const dir = `${CLAUDE_JOBS}/${id}`
+  const meta = readJson(fs, `${dir}/meta.json`)
+
+  if (!meta) {
+    return null
+  }
+
+  const nowS = Date.now() / 1000
+  const base = {
+    id,
+    resume: Boolean(meta.resume),
+    startedAt: Number(meta.started_at || meta.created_at || 0),
+    task: String(meta.task_head ?? '').replace(/\s+/g, ' ').trim()
+  }
+  const sum = readJson(fs, `${dir}/summary.json`)
+
+  if (sum?.status) {
+    claude.prog.delete(id)
+
+    return {
+      ...base,
+      denials: Number(sum.denials) || 0,
+      elapsed: Number(sum.elapsed_s) || 0,
+      endedAt: Number(sum.ended_at) || 0,
+      files: Number(sum.files) || 0,
+      lastDenial: String(sum.last_denial ?? ''),
+      status: String(sum.status),
+      turns: Number(sum.turns) || 0
+    }
+  }
+
+  const cancelled = fs.existsSync(`${dir}/cancelled`)
+  const exit = readJson(fs, `${dir}/exit.json`)
+  const p = claudeProgress(fs, id, dir)
+  const prog = { denials: p.denials, lastDenial: p.lastDenial, tool: p.tool, turns: p.turns }
+
+  if (exit && nowS - Number(exit.ended_at || 0) >= CLAUDE_SETTLE_S) {
+    // Finished without a summary (claude-sub before 0.2, or the summary failed): the same rules,
+    // minus the usage-limit check, which needs the result text.
+    const status = cancelled ? 'cancelled' : exit.timed_out ? 'timeout' : exit.code === 0 ? 'done' : 'error'
+
+    return { ...base, ...prog, elapsed: Number(exit.elapsed_s) || 0, endedAt: Number(exit.ended_at) || 0, status }
+  }
+
+  if (exit || pidAlive(meta.runner_pid)) {
+    return { ...base, ...prog, status: cancelled ? 'cancelling' : 'running' }
+  }
+
+  if (!meta.runner_pid && nowS - Number(meta.created_at || 0) < 15) {
+    return { ...base, ...prog, status: 'starting' }
+  }
+
+  return { ...base, ...prog, status: 'lost' }
+}
+
+function startClaude() {
+  if (claude.started) {
+    return
+  }
+
+  claude.started = true
+
+  const fs = process.getBuiltinModule?.('node:fs')
+
+  if (!fs) {
+    return
+  }
+
+  const run = () => {
+    let busy = false
+
+    try {
+      const ids = fs.existsSync(CLAUDE_JOBS)
+        ? fs.readdirSync(CLAUDE_JOBS).filter(n => CLAUDE_ID.test(n)).sort().slice(-CLAUDE_KEEP).reverse()
+        : []
+      const jobs = ids.map(id => readClaudeJob(fs, id)).filter(Boolean)
+
+      busy = jobs.some(j => CLAUDE_LIVE.has(j.status))
+
+      const sig = JSON.stringify(jobs.map(j => [j.id, j.status, j.turns, j.tool, j.denials]))
+
+      if (sig !== claude.sig) {
+        // A job that just finished flashes for FLASH_MS (green when done, red otherwise).
+        for (const j of jobs) {
+          const was = claude.jobs.find(x => x.id === j.id)
+
+          if (was && CLAUDE_LIVE.has(was.status) && !CLAUDE_LIVE.has(j.status)) {
+            claude.flash = { id: j.id, until: Date.now() + FLASH_MS }
+            flashUntil = Math.max(flashUntil, Date.now() + FLASH_MS)
+          }
+        }
+
+        claude.jobs = jobs
+        claude.sig = sig
+        claude.rev++
+      }
+
+      for (const id of claude.prog.keys()) {
+        if (!ids.includes(id)) {
+          claude.prog.delete(id)
+        }
+      }
+    } catch {
+      // keep the last good state
+    }
+
+    claude.timer = setTimeout(run, busy ? CLAUDE_BUSY_MS : CLAUDE_IDLE_MS)
+    claude.timer.unref?.()
+  }
+
+  run()
+}
+
 function startLoader() {
   if (loader.started) {
     return
@@ -548,6 +781,16 @@ export default function register(sdk) {
   }
 
   const ago = sec => (sec ? dur(Date.now() - sec * 1000) : '')
+  // "now", "5m", "3h" — how long ago a history row's job ended.
+  const agoShort = sec => {
+    if (!sec) {
+      return ''
+    }
+
+    const d = Math.max(0, Date.now() / 1000 - sec)
+
+    return d < 60 ? 'now' : d < 3600 ? `${Math.floor(d / 60)}m` : `${Math.floor(d / 3600)}h`
+  }
 
   const tilde = p => {
     const home = process.env.HOME
@@ -755,6 +998,7 @@ export default function register(sdk) {
       }
 
       startLoader()
+      startClaude()
 
       // Store events (every streamed token) and the animation clock share ONE tick: a repaint that
       // just happened satisfies both, so the panel never paints more than once per ANIM_MS.
@@ -775,16 +1019,19 @@ export default function register(sdk) {
       const offUi = b.ui.listen(bump)
       const offAgents = b.agents?.listen?.(bump)
       let lastData = null
+      let lastClaude = -1
       const clock = setInterval(() => {
         const ui = b.ui.get()
         const turn = b.turn.get()
         const anim =
-          ui.busy || Date.now() < flashUntil || (turn.tools ?? []).length || subsOf(turn).some(inFlight)
+          ui.busy || Date.now() < flashUntil || (turn.tools ?? []).length || subsOf(turn).some(inFlight) ||
+          claude.jobs.some(j => CLAUDE_LIVE.has(j.status))
 
-        const fresh = globalThis.__hyData?.data !== lastData
+        const fresh = globalThis.__hyData?.data !== lastData || claude.rev !== lastClaude
 
         if ((anim && !pending && Date.now() - lastPaint >= ANIM_MS - 10) || fresh) {
           lastData = globalThis.__hyData?.data
+          lastClaude = claude.rev
           paint()
         }
       }, ANIM_MS)
@@ -1283,9 +1530,130 @@ export default function register(sdk) {
       )
     }
 
+    // ── claude-sub block (pinned in the footer, under the cwd line) ──
+    // Lit while Claude Code works (pulsing chip, glowing row, turns · last tool · time); a job that just
+    // ended flashes green/red; history of the last day with each outcome; a scope-gate denial in red.
+    const claudeParts = (() => {
+      const jobs = claude.jobs
+      const nowS = now / 1000
+      const live = jobs.filter(j => CLAUDE_LIVE.has(j.status))
+      const hist = jobs.filter(j => !CLAUDE_LIVE.has(j.status) && nowS - (j.endedAt || j.startedAt) < CLAUDE_HISTORY_S)
+      const histMax = 3
+      const parts = { deny: null, head: null, hist: [], live: [] }
+      const flashing = claude.flash && now < claude.flash.until ? jobs.find(j => j.id === claude.flash.id) : null
+      const OUTCOME = {
+        cancelled: { color: c.dim, label: 'cancelled', mark: '⊘' },
+        done: { color: c.green, label: '', mark: '✓' },
+        error: { color: c.red, label: 'error', mark: '×' },
+        lost: { color: c.red, label: 'lost', mark: '?' },
+        rate_limited: { color: c.yellow, label: 'limit', mark: '◔' },
+        timeout: { color: c.orange, label: 'timeout', mark: '◷' }
+      }
+      const outcome = st => OUTCOME[st] ?? { color: c.dim, label: st, mark: '·' }
+      const todayN = hist.length
+      const deniedN = jobs.reduce((n, j) => n + (nowS - (j.endedAt || j.startedAt || nowS) < CLAUDE_HISTORY_S ? j.denials : 0), 0)
+      let chip
+      let tail = ''
+      let tailColor = c.dim
+
+      if (live.length) {
+        const j = live[0]
+        const startMs = j.startedAt ? j.startedAt * 1000 : now
+
+        chip = { bg: Math.floor(now / 300) % 2 ? c.orange : c.yellow, fg: c.deeper, text: `${spin} claude` }
+        tail = [live.length > 1 ? `${live.length} jobs` : j.status === 'cancelling' ? 'cancelling' : j.status === 'starting' ? 'starting' : '',
+          j.turns ? `${j.turns} turns` : '', j.tool, dur(now - startMs)].filter(Boolean).join(' · ')
+        tailColor = c.orange
+      } else if (flashing) {
+        const o = outcome(flashing.status)
+
+        chip = { bg: flashing.status === 'done' ? c.green : o.color, fg: c.deeper, text: `${o.mark} claude` }
+        tail = flashing.status === 'done' ? 'done' : o.label
+        tailColor = o.color
+      } else {
+        chip = { bg: c.surface, fg: c.idle, text: '✻ claude' }
+        tail = todayN ? `idle · ${todayN} today` : 'idle'
+      }
+
+      parts.head = (
+        h(
+          Text,
+          { key: 'cl-h', wrap: 'truncate-end' },
+          h(Text, { backgroundColor: chip.bg, bold: true, color: chip.fg }, ` ${chip.text} `),
+          h(Text, { color: tailColor }, ` ${fit(tail, W - chip.text.length - 3 - (deniedN ? 4 : 0))}`),
+          deniedN ? h(Text, { bold: true, color: c.red }, ` ✗${deniedN}`) : null
+        )
+      )
+
+      for (const j of live.slice(0, 2)) {
+        parts.live.push(
+          h(Row, {
+            bold: true,
+            c,
+            color: c.fg,
+            glowNow: now,
+            key: `cl-l${j.id}`,
+            mark: spin,
+            markColor: c.orange,
+            right: `${j.resume ? '↻ ' : ''}${j.denials ? `✗${j.denials} ` : ''}`.trim(),
+            rightColor: j.denials ? c.red : c.comment,
+            text: j.task || j.id
+          })
+        )
+      }
+
+      for (const j of hist.slice(0, histMax)) {
+        const o = outcome(j.status)
+        const flash = flashing?.id === j.id
+
+        parts.hist.push(
+          h(Row, {
+            bold: flash,
+            c,
+            color: flash ? c.fg : c.dim,
+            key: `cl-d${j.id}`,
+            mark: o.mark,
+            markColor: o.color,
+            // ✗N denials · outcome word (how long it ran, for done) · how long ago it ended
+            right: [j.denials ? `✗${j.denials}` : '', o.label || (j.elapsed ? dur(j.elapsed * 1000) : ''), agoShort(j.endedAt || j.startedAt)]
+              .filter(Boolean).join(' · '),
+            rightColor: j.denials || j.status === 'error' || j.status === 'lost' ? c.red : c.comment,
+            text: j.task || j.id
+          })
+        )
+      }
+
+      // The newest job that was refused something: what the guard said (rule · path), in red.
+      const refused = [...live, ...hist.slice(0, histMax)].find(j => j.denials && j.lastDenial)
+
+      if (refused) {
+        const why = refused.lastDenial.replace(/^.*?\[scope-gate\]\s*(stopped:\s*)?/, '').replace(/\s+—.*$/, '')
+
+        parts.deny = h(Text, { color: c.red, key: 'cl-x', wrap: 'truncate-end' }, ` ✗ ${fit(why, W - 4)}`)
+      }
+
+      return parts
+    })()
+
+    // The block in at most n lines, shedding by priority: history first (oldest first), then the
+    // denial line, then the second live job; the header line always stays. Shown in reading order.
+    const claudeFull = 1 + claudeParts.live.length + claudeParts.hist.length + (claudeParts.deny ? 1 : 0)
+    const claudeBlock = n => {
+      let room = Math.max(0, n - 1)
+      const live = claudeParts.live.slice(0, room)
+      room -= live.length
+      const deny = claudeParts.deny && room > 0 ? claudeParts.deny : null
+      room -= deny ? 1 : 0
+      const hist = claudeParts.hist.slice(0, Math.max(0, room))
+
+      return [claudeParts.head, ...live, ...hist, ...(deny ? [deny] : [])]
+    }
+
     // Fit the rail: drop whole sections from the bottom (files, MCP, skills …) until the rest and
-    // the 3-line footer fit; the title block, TODO and SUBAGENTS come first and stay longest.
-    const FOOT = 3
+    // the footer (cwd, the claude block, the hint line) fit; the title block, TODO and SUBAGENTS come
+    // first and stay longest.
+    let claudeN = Math.min(claudeFull, Math.max(1, Math.floor(rows / 3)))
+    let FOOT = 3 + claudeN
 
     while (used + FOOT > rows && nodes.length > 1) {
       const lines = nodeLines.pop()
@@ -1303,7 +1671,15 @@ export default function register(sdk) {
       }
     }
 
+    // Still too tall with only the title block left (a very short rail): the claude block shrinks
+    // toward its header line before the footer gives up.
+    if (used + FOOT > rows) {
+      claudeN = Math.max(1, rows - used - 3)
+      FOOT = 3 + claudeN
+    }
+
     const footOn = used + FOOT <= rows
+    const claudeRows = claudeBlock(claudeN)
 
     // ── pinned footer: cwd · branch ──
     footOn && nodes.push(
@@ -1318,6 +1694,7 @@ export default function register(sdk) {
               info.branch ? h(Text, { color: c.accent }, `  ${IC.branch} ${fit(info.branch, 12)}`) : null
             )
           : null,
+        ...claudeRows,
         h(Text, { color: c.comment }, '/hy-sidebar · ^X sessions · /hy-tabs')
       )
     )
@@ -1386,6 +1763,7 @@ export default function register(sdk) {
     const boot = () => {
       if (bridge()) {
         startLoader() // tabs use the data even with the sidebar closed
+        startClaude() // the powerline's claude cell reads it while the sidebar is closed
 
         if (process.env.HY_SIDEBAR !== '0') {
           sync()

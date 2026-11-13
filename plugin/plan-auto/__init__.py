@@ -4,8 +4,8 @@ The plan-mode plugin has no "default on" setting: it turns on only via /plan, /p
 agent calling plan_mode(on) itself, and models skip that. plan-auto turns it on for the agent —
 lazily, at the moment the agent first tries to change something:
 
-* ``pre_tool_call``: the first ``write_file`` / ``patch``, or a ``delegate_task`` to the ``coder``
-  route, in a session with no plan running is blocked, and plan mode is turned on through
+* ``pre_tool_call``: the first ``write_file`` / ``patch``, a ``delegate_task`` to the ``coder``
+  route, or a direct ``claude_code`` job (the claude-sub MCP server), in a session with no plan running is blocked, and plan mode is turned on through
   plan-mode's own ``_run_command`` (the same path its ``plan_mode`` tool uses). The block message
   carries plan-mode's planning note, so the agent plans in the same turn and submits it for the
   approval card. After approval plan-mode's executing phase lets the edits through.
@@ -16,8 +16,11 @@ Why lazy: turning plan mode on at the start of every turn cost one extra model r
 (``plan_mode off``) on every question or command — 7-10 s of dead air before the answer. Now a
 request that changes nothing never touches plan mode.
 
-Gated: ``write_file``, ``patch``, and ``delegate_task`` to the code route — including tasks with no
-``profile``, which ``delegation.backends.profile_routes.default`` (coder) receives. Not gated (cannot
+Gated: ``write_file``, ``patch``, ``delegate_task`` to the code route — including tasks with no
+``profile``, which ``delegation.backends.profile_routes.default`` (coder) receives — and claude-sub's
+``claude_code`` (``mcp__<server>__claude_code``): it hands file edits to Claude Code, so called from the
+main session it would skip the plan the coder route waits for. Its ``claude_status``/``claude_cancel``/
+``claude_jobs`` only read or stop a job and pass. Not gated (cannot
 be told apart from reads): ``terminal`` and ``execute_code``; SOUL routes code to the coder anyway.
 
 Skipped: plan mode already on or executing an approved plan; a turn that already went through a
@@ -49,6 +52,8 @@ _OPT_OUT = re.compile(
 _INJECTED = re.compile(r"^\s*\[(?:ASYNC |BACKGROUND |SYSTEM|/plan\b)")
 _IMPLEMENT_PREFIX = "Implement the approved plan at "
 _EDIT_TOOLS = {"write_file", "patch"}
+# claude-sub's job starter as Hermes registers it: mcp__<sanitized server>__claude_code.
+_CLAUDE_CODE = re.compile(r"^mcp__\w+__claude_code$")
 _CODE_ROUTE = "coder"
 _ONESHOT_FLAGS = {"-z", "--oneshot", "-q", "--query", "--query-file", "-Q", "--quiet-query"}
 _route_cache: dict[str, Any] = {"mtime": None, "default": _CODE_ROUTE}
@@ -108,6 +113,18 @@ def _oneshot() -> bool:
     return any(a in _ONESHOT_FLAGS or a.split("=", 1)[0] in _ONESHOT_FLAGS for a in sys.argv[1:])
 
 
+def _yaml_load(stream: Any) -> Any:
+    """Parse YAML the way Hermes does. Hermes reads its config through ``hermes_yaml`` (ruamel); it does
+    NOT ship PyYAML — ``import yaml`` raised in the gateway, so this function always fell to its
+    except branch and every profile-less delegation was judged as the ``coder`` route, whatever
+    ``delegation.backends.profile_routes.default`` said. PyYAML stays as the fallback outside Hermes."""
+    try:
+        import hermes_yaml as yaml_mod  # type: ignore[import-not-found]
+    except ImportError:
+        import yaml as yaml_mod  # type: ignore[import-not-found, no-redef]
+    return yaml_mod.safe_load(stream)
+
+
 def _default_route() -> str:
     """Where a delegate_task without ``profile`` goes: delegation.backends.profile_routes.default."""
     try:
@@ -115,10 +132,8 @@ def _default_route() -> str:
         path = os.path.join(home, "config.yaml")
         mtime = os.path.getmtime(path)
         if _route_cache["mtime"] != mtime:
-            import yaml  # Hermes depends on PyYAML
-
             with open(path, encoding="utf-8") as fh:
-                cfg = yaml.safe_load(fh) or {}
+                cfg = _yaml_load(fh) or {}
             d = (cfg.get("delegation") or {})
             route = (((d.get("backends") or {}).get("profile_routes") or {}).get("default")
                      if d.get("backend") == "profile_routes" else None)
@@ -141,7 +156,7 @@ def _identity(mod: Any, platform: str) -> Any:
 def _wants_edit(tool_name: str, args: Any) -> bool:
     """Does this call change files: an edit tool, or code work handed to the coder route?"""
     a = args if isinstance(args, dict) else {}
-    if tool_name in _EDIT_TOOLS:
+    if tool_name in _EDIT_TOOLS or _CLAUDE_CODE.match(tool_name or ""):
         return True
     if tool_name == "delegate_task":
         tasks = a.get("tasks")
