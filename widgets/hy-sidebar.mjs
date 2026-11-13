@@ -769,6 +769,7 @@ export default function register(sdk) {
   const h = sdk.h ?? React.createElement
   const { useEffect, useRef, useState } = React
   const W = WIDTH - 2
+  const EDGE = '\u258c' // ▌ a row's coloured edge (claude block, provider lines — same as the dock)
 
   // ── helpers ────────────────────────────────────────────────────────────
   const fit = (s, w) => {
@@ -948,7 +949,7 @@ export default function register(sdk) {
     return onToggle ? h(Box, { onClick: onToggle }, line) : line
   }
 
-  const Row = ({ c, mark, markColor, text, color, right, rightColor, dim, bold, glowNow, strike }) => {
+  const Row = ({ c, edge, mark, markColor, text, color, right, rightColor, dim, bold, glowNow, strike }) => {
     const r = right ? ` ${right}` : ''
     const room = Math.max(4, W - 3 - r.length)
     const body = fit(text, room)
@@ -956,7 +957,8 @@ export default function register(sdk) {
     return h(
       Text,
       { wrap: 'truncate-end' },
-      h(Text, { color: markColor }, ` ${mark} `),
+      edge ? h(Text, { color: edge }, EDGE) : h(Text, null, ' '),
+      h(Text, { color: markColor }, `${mark} `),
       glowNow != null
         ? h(Glow, { base: color, bold, glow: '#FFFFFF', now: glowNow, text: body })
         : h(Text, { bold, color, dimColor: dim, strikethrough: strike }, body),
@@ -964,6 +966,20 @@ export default function register(sdk) {
       r ? h(Text, { color: rightColor ?? c.dim }, r) : null
     )
   }
+
+  // A rounded pill (Nerd Font caps, like hy-tabs and the dock): ( text ). Width = text + 2.
+  const Pill = ({ bg, bold = true, fg, text }) =>
+    h(
+      Text,
+      null,
+      h(Text, { color: bg }, '\u{e0b6}'),
+      h(Text, { backgroundColor: bg, bold, color: fg }, text),
+      h(Text, { color: bg }, '\u{e0b4}')
+    )
+
+  // An edged line (the say / denial / goal lines under a row): coloured edge, then the text.
+  const Edged = ({ edge, color, italic, key, text }) =>
+    h(Text, { key, wrap: 'truncate-end' }, h(Text, { color: edge }, EDGE), h(Text, { color, italic }, text))
 
   const Chips = ({ items }) =>
     h(
@@ -1652,8 +1668,8 @@ export default function register(sdk) {
         h(
           Text,
           { key: 'cl-h', wrap: 'truncate-end' },
-          h(Text, { backgroundColor: chip.bg, bold: true, color: chip.fg }, ` ${chip.text} `),
-          h(Text, { color: tailColor }, ` ${fit(tail, W - chip.text.length - 3 - (deniedN ? 4 : 0))}`),
+          h(Pill, { bg: chip.bg, fg: chip.fg, text: chip.text }),
+          h(Text, { color: tailColor }, ` ${fit(tail, W - chip.text.length - 4 - (deniedN ? 4 : 0))}`),
           deniedN ? h(Text, { bold: true, color: c.red }, ` ✗${deniedN}`) : null
         )
       )
@@ -1667,6 +1683,7 @@ export default function register(sdk) {
             bold: true,
             c,
             color: c.fg,
+            edge: c.orange,
             glowNow: now,
             key: `cl-l${j.id}`,
             mark: spin,
@@ -1681,11 +1698,11 @@ export default function register(sdk) {
 
         parts.live.push({
           rank: 1,
-          node: h(Row, { c, color: c.orange, key: `cl-a${j.id}`, mark: '›', markColor: c.orange, right: j.turns ? `turn ${j.turns}` : '', rightColor: c.comment, text: doing })
+          node: h(Row, { c, color: c.orange, edge: c.orange, key: `cl-a${j.id}`, mark: '›', markColor: c.orange, right: j.turns ? `turn ${j.turns}` : '', rightColor: c.comment, text: doing })
         })
 
         if (i === 0 && j.say) {
-          parts.live.push({ rank: 2, node: h(Text, { color: c.dim, italic: true, key: `cl-s${j.id}`, wrap: 'truncate-end' }, `   “${fit(j.say, W - 6)}”`) })
+          parts.live.push({ rank: 2, node: h(Edged, { color: c.dim, edge: c.orange, italic: true, key: `cl-s${j.id}`, text: `  “${fit(j.say, W - 6)}”` }) })
         }
       })
 
@@ -1693,7 +1710,7 @@ export default function register(sdk) {
       const ended = flashing ?? (hist[0] && nowS - hist[0].endedAt < 120 ? hist[0] : null)
 
       if (!live.length && ended?.say) {
-        parts.say = h(Text, { color: c.dim, italic: true, key: 'cl-r', wrap: 'truncate-end' }, `   “${fit(ended.say, W - 6)}”`)
+        parts.say = h(Edged, { color: c.dim, edge: outcome(ended.status).color, italic: true, key: 'cl-r', text: `  “${fit(ended.say, W - 6)}”` })
       }
 
       // Other providers the routes run on (Coarena for researcher today): model(s) and routes read from
@@ -1707,14 +1724,14 @@ export default function register(sdk) {
             : g.state === 'failed'
               ? { bg: c.line, fg: c.red, text: `× ${g.label}` }
               : { bg: c.surface, fg: c.idle, text: `◇ ${g.label}` }
-        const what = `${g.models.join(', ')} · ${g.routes.join(', ')}`
 
         parts.prov.push(
           h(
             Text,
             { key: `pv-${g.provider}`, wrap: 'truncate-end' },
-            h(Text, { backgroundColor: gchip.bg, bold: true, color: gchip.fg }, ` ${gchip.text} `),
-            h(Text, { color: on ? c.fg : c.dim }, ` ${fit(what, W - gchip.text.length - 3)}`)
+            h(Pill, { bg: gchip.bg, fg: gchip.fg, text: gchip.text }),
+            h(Text, { bold: on, color: on ? c.fg : c.dim }, ` ${fit(g.models.join(', '), W - gchip.text.length - 4)}`),
+            h(Text, { color: c.comment }, fit(` · ${g.routes.join(', ')}`, Math.max(0, W - gchip.text.length - 4 - g.models.join(', ').length - 1)))
           )
         )
 
@@ -1722,7 +1739,7 @@ export default function register(sdk) {
           const sub = subs.find(x => inFlight(x) && g.routes.includes(routeOf(x.goal, data, x.model) ?? ''))
 
           if (sub?.goal) {
-            parts.prov.push(h(Text, { color: c.purple, key: `pv-g${g.provider}`, wrap: 'truncate-end' }, `   › ${fit(sub.goal, W - 5)}`))
+            parts.prov.push(h(Edged, { color: c.purple, edge: c.purple, key: `pv-g${g.provider}`, text: `› ${fit(sub.goal, W - 5)}` }))
           }
         }
       }
@@ -1736,6 +1753,7 @@ export default function register(sdk) {
             bold: flash,
             c,
             color: flash ? c.fg : c.dim,
+            edge: o.color,
             key: `cl-d${j.id}`,
             mark: o.mark,
             markColor: o.color,
@@ -1754,7 +1772,7 @@ export default function register(sdk) {
       if (refused) {
         const why = refused.lastDenial.replace(/^.*?\[scope-gate\]\s*(stopped:\s*)?/, '').replace(/\s+—.*$/, '')
 
-        parts.deny = h(Text, { color: c.red, key: 'cl-x', wrap: 'truncate-end' }, ` ✗ ${fit(why, W - 4)}`)
+        parts.deny = h(Edged, { color: c.red, edge: c.red, key: 'cl-x', text: `✗ ${fit(why, W - 4)}` })
       }
 
       return parts

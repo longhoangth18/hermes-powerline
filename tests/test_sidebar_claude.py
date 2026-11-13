@@ -33,10 +33,16 @@ def render(rows: int, scenario: str) -> str:
         return out.stdout + out.stderr
 
 
-def footer(frame: str) -> list[str]:
+def raw_footer(frame: str) -> list[str]:
     lines = [l[1:] for l in frame.splitlines() if l.startswith("|")]
     start = next((i for i, l in enumerate(lines) if "\U000f0770" in l), len(lines))
     return lines[start:]
+
+
+def footer(frame: str) -> list[str]:
+    """The footer with its decoration read as spaces: pill caps ( ) and the row edge ▌ — so the
+    text checks below read the same words in the same columns."""
+    return [l.replace("\ue0b6", " ").replace("\ue0b4", " ").replace("\u258c", " ") for l in raw_footer(frame)]
 
 
 def main() -> int:
@@ -61,6 +67,10 @@ def main() -> int:
     check("jobs older than a day are left out", "very old job" not in f, f)
     check("header counts the day's denials", any("claude" in l and l.rstrip().endswith("✗2") for l in foot[:3]), f)
     check("no line is wider than the rail (40 cells)", all(len(l) <= 40 for l in foot), f)
+    raw = raw_footer(f)
+    check("style: the claude chip is a rounded pill", any(l.startswith("\ue0b6") and "claude\ue0b4" in l for l in raw), f)
+    check("style: live, history and denial rows carry the coloured edge ▌",
+          all(any(l.startswith("\u258c") and key in l for l in raw) for key in ("refactor parser", "Edit parser", "fib.py", "write@system")), f)
 
     f = render(20, "live")
     foot = footer(f)

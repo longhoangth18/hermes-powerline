@@ -71,6 +71,7 @@ if (scenario === 'finish') {
   await new Promise(r => setTimeout(r, 1500))
 }
 inst.unmount()
+if (process.env.HARNESS_ANSI) fs.writeFileSync(process.env.HARNESS_ANSI, out)   // raw frame, for screenshots
 const plain = out.replace(/\x1b\[[0-9;]*m/g, '')
 console.log(plain.split('\n').map(l => '|' + l).join('\n'))
 console.log(`(lines=${plain.split('\n').length}, budget=${Number(rowsArg) - 9})`)

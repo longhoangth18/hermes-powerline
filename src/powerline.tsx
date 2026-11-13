@@ -110,7 +110,7 @@ interface PlSeg {
   render?: (bg: string) => ReactNode
   /** Grey palette only: alarm / accent text instead of plain ink. */
   tone?: __PlTone
-  /** Keep bg/fg as given even on the grey ramp (alarms must stay red). */
+  /** Accent cell: its own colours on colour palettes; on the grey ramp it takes the ramp grey and its colour becomes the bold text colour (alarms stay red, as text). */
   fixed?: boolean
   /** Idle/secondary cell: dim text, also under the mono palette. */
   muted?: boolean
@@ -1747,10 +1747,18 @@ function PowerlineRule(p: StatusRuleProps) {
   // Display order: pinned essentials, then the tail in budget order.
   const left = [...pinned, ...tail]
 
-  // Grey palette: walk the ramp dark → light, left to right.
+  // Grey palette: walk the ramp dark → light, left to right. Accent cells (fixed: inbox, claude,
+  // provider, API error) take their place on the ramp too, so the chevron chain never breaks into a
+  // coloured rectangle; their colour becomes the (bold) text colour instead of the background.
   if (mono) {
     left.forEach((seg, i) => {
       if (seg.fixed) {
+        const accent = seg.bg
+
+        seg.bg = __plLeftGray(i, left.length)
+        seg.fg = accent && !__plIsLight(seg.bg) ? accent : dark
+        seg.bold = true
+
         return
       }
 
