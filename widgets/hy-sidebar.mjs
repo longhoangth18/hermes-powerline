@@ -240,6 +240,47 @@ async function readSession(sid) {
 // Read lazily, re-read when config.yaml changes (checked at most every 10 s).
 let routeCfg = null
 
+// A config's primary model and provider: the model: block, up to the next top-level key (comments allowed).
+function modelOf(text) {
+  const block = String(text).match(/^model:\n([\s\S]*?)(?=^[^\s#])/m)?.[1] ?? ''
+  const pick = key => block.match(new RegExp(`^[ \\t]+${key}:\\s*["']?([^"'\\n#]+?)["']?\\s*(?:#.*)?$`, 'm'))?.[1]?.trim()
+  const model = pick('default') || pick('model')
+
+  return model ? { model, provider: pick('provider') || '' } : null
+}
+
+// Providers the route profiles run on besides main's, with their models and routes, and whether one of
+// those routes is working now — re-read from the configs (cached 10 s, mtime-checked), never hard-coded,
+// so moving Kimi to another route or Coarena to another model shows up by itself. Published for the bar.
+function providerLines() {
+  const cfg = routeConfig()
+  const states = routeStates()
+  const mainProv = cfg.main?.provider ?? ''
+  const groups = new Map()
+
+  for (const [route, rc] of cfg.routes) {
+    if (!rc.provider || rc.provider === mainProv) {
+      continue
+    }
+
+    const g = groups.get(rc.provider) ?? { models: new Set(), provider: rc.provider, routes: [], state: 'idle' }
+    const st = states.get(route) ?? 'idle'
+
+    g.models.add(rc.model)
+    g.routes.push(route)
+    g.state = st === 'active' || g.state === 'active' ? 'active' : st === 'failed' || g.state === 'failed' ? 'failed' : st === 'done' || g.state === 'done' ? 'done' : 'idle'
+    groups.set(rc.provider, g)
+  }
+
+  return [...groups.values()].map(g => ({
+    label: g.provider.replace(/^custom:/, ''),
+    models: [...g.models],
+    provider: g.provider,
+    routes: g.routes.sort(),
+    state: g.state
+  }))
+}
+
 function routeConfig() {
   const now = Date.now()
 
@@ -247,7 +288,7 @@ function routeConfig() {
     return routeCfg
   }
 
-  const cfg = { at: now, byModel: new Map(), def: null, mtime: routeCfg?.mtime ?? 0 }
+  const cfg = { at: now, byModel: new Map(), def: null, main: null, mtime: routeCfg?.mtime ?? 0, routes: new Map() }
 
   try {
     const fs = process.getBuiltinModule?.('node:fs')
@@ -263,6 +304,7 @@ function routeConfig() {
 
     cfg.mtime = mtime
     const text = fs.readFileSync(`${root}/config.yaml`, 'utf8')
+    cfg.main = modelOf(text)
     // The block ends at the next top-level KEY; column-0 comments inside it are fine in YAML.
     const block = text.match(/^delegation:\n([\s\S]*?)(?=^[^\s#])/m)?.[1] ?? ''
     const routesAt = block.indexOf('profile_routes:')
@@ -277,6 +319,11 @@ function routeConfig() {
       try {
         const pc = fs.readFileSync(`${root}/profiles/${r}/config.yaml`, 'utf8')
         const model = pc.match(/^model:\n(?:[ \t]+#.*\n)*[ \t]+(?:default|model):\s*["']?([^"'\n]+?)["']?\s*$/m)?.[1]
+        const route = modelOf(pc)
+
+        if (route) {
+          cfg.routes.set(r, route)
+        }
 
         if (model) {
           owners.set(model, [...(owners.get(model) ?? []), r])
@@ -357,10 +404,25 @@ const pidAlive = pid => {
   }
 }
 
+// What a tool call works on, in a few words: the file for edits and reads, the command for Bash, the
+// pattern for searches, the URL for fetches.
+function toolTarget(input) {
+  const a = input && typeof input === 'object' ? input : {}
+  const file = a.file_path ?? a.notebook_path ?? a.path
+
+  if (typeof file === 'string' && file) {
+    return file.split('/').filter(Boolean).slice(-2).join('/')
+  }
+
+  const v = a.command ?? a.pattern ?? a.url ?? a.query ?? a.description ?? a.prompt
+
+  return typeof v === 'string' ? v.replace(/\s+/g, ' ').trim().slice(0, 120) : ''
+}
+
 // What a job did so far, read incrementally from its stream (only the new bytes each poll, so turn and
 // denial counts stay exact on long jobs): assistant turns, the last tool it called, scope-gate denials.
 function claudeProgress(fs, id, dir) {
-  let st = claude.prog.get(id) ?? { denials: 0, lastDenial: '', off: 0, rest: '', tool: '', turns: 0 }
+  let st = claude.prog.get(id) ?? { denials: 0, lastDenial: '', off: 0, rest: '', say: '', target: '', tool: '', turns: 0 }
   let fd
 
   try {
@@ -368,7 +430,7 @@ function claudeProgress(fs, id, dir) {
     const size = fs.fstatSync(fd).size
 
     if (size < st.off) {
-      st = { denials: 0, lastDenial: '', off: 0, rest: '', tool: '', turns: 0 } // rewritten: start over
+      st = { denials: 0, lastDenial: '', off: 0, rest: '', say: '', target: '', tool: '', turns: 0 } // rewritten: start over
     }
 
     const len = Math.min(size - st.off, 4 << 20)
@@ -396,6 +458,9 @@ function claudeProgress(fs, id, dir) {
           for (const part of ev.message?.content ?? []) {
             if (part?.type === 'tool_use') {
               st.tool = String(part.name ?? '')
+              st.target = toolTarget(part.input)
+            } else if (part?.type === 'text' && String(part.text ?? '').trim()) {
+              st.say = String(part.text).replace(/\s+/g, ' ').trim().slice(0, 300)
             }
           }
         } else if (ev?.type === 'user') {
@@ -442,7 +507,9 @@ function readClaudeJob(fs, id) {
 
   const nowS = Date.now() / 1000
   const base = {
+    effort: String(meta.effort ?? ''),
     id,
+    model: String(meta.model ?? ''),
     resume: Boolean(meta.resume),
     startedAt: Number(meta.started_at || meta.created_at || 0),
     task: String(meta.task_head ?? '').replace(/\s+/g, ' ').trim()
@@ -459,6 +526,7 @@ function readClaudeJob(fs, id) {
       endedAt: Number(sum.ended_at) || 0,
       files: Number(sum.files) || 0,
       lastDenial: String(sum.last_denial ?? ''),
+      say: String(sum.result_head ?? '').replace(/\s+/g, ' ').trim(),
       status: String(sum.status),
       turns: Number(sum.turns) || 0
     }
@@ -467,7 +535,7 @@ function readClaudeJob(fs, id) {
   const cancelled = fs.existsSync(`${dir}/cancelled`)
   const exit = readJson(fs, `${dir}/exit.json`)
   const p = claudeProgress(fs, id, dir)
-  const prog = { denials: p.denials, lastDenial: p.lastDenial, tool: p.tool, turns: p.turns }
+  const prog = { denials: p.denials, lastDenial: p.lastDenial, say: p.say, target: p.target, tool: p.tool, turns: p.turns }
 
   if (exit && nowS - Number(exit.ended_at || 0) >= CLAUDE_SETTLE_S) {
     // Finished without a summary (claude-sub before 0.2, or the summary failed): the same rules,
@@ -512,7 +580,7 @@ function startClaude() {
 
       busy = jobs.some(j => CLAUDE_LIVE.has(j.status))
 
-      const sig = JSON.stringify(jobs.map(j => [j.id, j.status, j.turns, j.tool, j.denials]))
+      const sig = JSON.stringify(jobs.map(j => [j.id, j.status, j.turns, j.tool, j.target, j.say, j.denials]))
 
       if (sig !== claude.sig) {
         // A job that just finished flashes for FLASH_MS (green when done, red otherwise).
@@ -675,6 +743,7 @@ function routeStates() {
 }
 
 globalThis.__hyRouteStates = routeStates
+globalThis.__hyProviderLines = providerLines
 globalThis.__hyRouteOf = routeOf
 
 // Section folding: key → collapsed? Only a header click folds a section; nothing folds by itself.
@@ -1539,7 +1608,7 @@ export default function register(sdk) {
       const live = jobs.filter(j => CLAUDE_LIVE.has(j.status))
       const hist = jobs.filter(j => !CLAUDE_LIVE.has(j.status) && nowS - (j.endedAt || j.startedAt) < CLAUDE_HISTORY_S)
       const histMax = 3
-      const parts = { deny: null, head: null, hist: [], live: [] }
+      const parts = { deny: null, head: null, hist: [], live: [], prov: [], say: null }
       const flashing = claude.flash && now < claude.flash.until ? jobs.find(j => j.id === claude.flash.id) : null
       const OUTCOME = {
         cancelled: { color: c.dim, label: 'cancelled', mark: '⊘' },
@@ -1556,23 +1625,27 @@ export default function register(sdk) {
       let tail = ''
       let tailColor = c.dim
 
+      // Which Claude: model · effort of the newest job (claude-sub's own settings, so a change shows up).
+      const top = live[0] ?? jobs[0]
+      const who = top?.model ? `${top.model.replace(/^claude-/, '')}${top.effort ? `·${top.effort}` : ''}` : ''
+
       if (live.length) {
         const j = live[0]
         const startMs = j.startedAt ? j.startedAt * 1000 : now
 
         chip = { bg: Math.floor(now / 300) % 2 ? c.orange : c.yellow, fg: c.deeper, text: `${spin} claude` }
-        tail = [live.length > 1 ? `${live.length} jobs` : j.status === 'cancelling' ? 'cancelling' : j.status === 'starting' ? 'starting' : '',
-          j.turns ? `${j.turns} turns` : '', j.tool, dur(now - startMs)].filter(Boolean).join(' · ')
+        tail = [who, dur(now - startMs), live.length > 1 ? `${live.length} jobs` : j.status === 'cancelling' ? 'cancelling' : j.status === 'starting' ? 'starting' : '']
+          .filter(Boolean).join(' · ')
         tailColor = c.orange
       } else if (flashing) {
         const o = outcome(flashing.status)
 
         chip = { bg: flashing.status === 'done' ? c.green : o.color, fg: c.deeper, text: `${o.mark} claude` }
-        tail = flashing.status === 'done' ? 'done' : o.label
+        tail = [who, flashing.status === 'done' ? 'done' : o.label].filter(Boolean).join(' · ')
         tailColor = o.color
       } else {
         chip = { bg: c.surface, fg: c.idle, text: '✻ claude' }
-        tail = todayN ? `idle · ${todayN} today` : 'idle'
+        tail = [who, todayN ? `${todayN} today` : 'idle'].filter(Boolean).join(' · ')
       }
 
       parts.head = (
@@ -1585,9 +1658,12 @@ export default function register(sdk) {
         )
       )
 
-      for (const j of live.slice(0, 2)) {
+      // Live jobs: the task, then what Claude is doing right now (tool → its file / command / pattern)
+      // and, for the first job, the last thing it said — so a working Claude is visibly working.
+      // Each live line carries a rank for shedding: 0 the task, 1 what it is doing, 2 its last words.
+      live.slice(0, 2).forEach((j, i) => {
         parts.live.push(
-          h(Row, {
+          { rank: 0, node: h(Row, {
             bold: true,
             c,
             color: c.fg,
@@ -1598,8 +1674,57 @@ export default function register(sdk) {
             right: `${j.resume ? '↻ ' : ''}${j.denials ? `✗${j.denials} ` : ''}`.trim(),
             rightColor: j.denials ? c.red : c.comment,
             text: j.task || j.id
-          })
+          }) }
         )
+
+        const doing = j.tool ? `${j.tool}${j.target ? ` ${j.target}` : ''}` : j.status === 'starting' ? 'starting Claude Code…' : 'thinking…'
+
+        parts.live.push({
+          rank: 1,
+          node: h(Row, { c, color: c.orange, key: `cl-a${j.id}`, mark: '›', markColor: c.orange, right: j.turns ? `turn ${j.turns}` : '', rightColor: c.comment, text: doing })
+        })
+
+        if (i === 0 && j.say) {
+          parts.live.push({ rank: 2, node: h(Text, { color: c.dim, italic: true, key: `cl-s${j.id}`, wrap: 'truncate-end' }, `   “${fit(j.say, W - 6)}”`) })
+        }
+      })
+
+      // The job that just ended: what Claude reported (first words of its result).
+      const ended = flashing ?? (hist[0] && nowS - hist[0].endedAt < 120 ? hist[0] : null)
+
+      if (!live.length && ended?.say) {
+        parts.say = h(Text, { color: c.dim, italic: true, key: 'cl-r', wrap: 'truncate-end' }, `   “${fit(ended.say, W - 6)}”`)
+      }
+
+      // Other providers the routes run on (Coarena for researcher today): model(s) and routes read from
+      // the configs, lit while one of those routes works, with the goal it is working on.
+      for (const g of globalThis.__hyProviderLines?.() ?? []) {
+        const on = g.state === 'active'
+        const gchip = on
+          ? { bg: Math.floor(now / 300) % 2 ? c.purple : c.cyan, fg: c.deeper, text: `${spin} ${g.label}` }
+          : g.state === 'done'
+            ? { bg: c.line, fg: c.green, text: `✓ ${g.label}` }
+            : g.state === 'failed'
+              ? { bg: c.line, fg: c.red, text: `× ${g.label}` }
+              : { bg: c.surface, fg: c.idle, text: `◇ ${g.label}` }
+        const what = `${g.models.join(', ')} · ${g.routes.join(', ')}`
+
+        parts.prov.push(
+          h(
+            Text,
+            { key: `pv-${g.provider}`, wrap: 'truncate-end' },
+            h(Text, { backgroundColor: gchip.bg, bold: true, color: gchip.fg }, ` ${gchip.text} `),
+            h(Text, { color: on ? c.fg : c.dim }, ` ${fit(what, W - gchip.text.length - 3)}`)
+          )
+        )
+
+        if (on) {
+          const sub = subs.find(x => inFlight(x) && g.routes.includes(routeOf(x.goal, data, x.model) ?? ''))
+
+          if (sub?.goal) {
+            parts.prov.push(h(Text, { color: c.purple, key: `pv-g${g.provider}`, wrap: 'truncate-end' }, `   › ${fit(sub.goal, W - 5)}`))
+          }
+        }
       }
 
       for (const j of hist.slice(0, histMax)) {
@@ -1635,18 +1760,32 @@ export default function register(sdk) {
       return parts
     })()
 
-    // The block in at most n lines, shedding by priority: history first (oldest first), then the
-    // denial line, then the second live job; the header line always stays. Shown in reading order.
-    const claudeFull = 1 + claudeParts.live.length + claudeParts.hist.length + (claudeParts.deny ? 1 : 0)
+    const cp = claudeParts
+    const claudeFull = 1 + cp.live.length + cp.prov.length + cp.hist.length + (cp.deny ? 1 : 0) + (cp.say ? 1 : 0)
+    // At most n lines, kept by priority — header, the live tasks, the denial line, what each live job
+    // is doing, the other providers, Claude's last words, the last result, history (oldest goes first) —
+    // and shown in reading order: Claude first, the other providers under it.
     const claudeBlock = n => {
       let room = Math.max(0, n - 1)
-      const live = claudeParts.live.slice(0, room)
-      room -= live.length
-      const deny = claudeParts.deny && room > 0 ? claudeParts.deny : null
-      room -= deny ? 1 : 0
-      const hist = claudeParts.hist.slice(0, Math.max(0, room))
+      const take = list => {
+        const got = list.slice(0, Math.max(0, room))
+        room -= got.length
 
-      return [claudeParts.head, ...live, ...hist, ...(deny ? [deny] : [])]
+        return got
+      }
+      const kept = new Set()
+      const keep = list => take(list).forEach(x => kept.add(x))
+
+      keep(cp.live.filter(x => x.rank === 0))
+      const deny = take(cp.deny ? [cp.deny] : [])
+      keep(cp.live.filter(x => x.rank === 1))
+      const prov = take(cp.prov)
+      keep(cp.live.filter(x => x.rank === 2))
+      const say = take(cp.say ? [cp.say] : [])
+      const hist = take(cp.hist)
+      const live = cp.live.filter(x => kept.has(x)).map(x => x.node)
+
+      return [cp.head, ...live, ...say, ...hist, ...deny, ...prov]
     }
 
     // Fit the rail: drop whole sections from the bottom (files, MCP, skills …) until the rest and

@@ -29,20 +29,33 @@ const ev = o => JSON.stringify(o) + '\n'
 const stream = ev({ type: 'system' }) + ev({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Read' }] } }) +
   ev({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Write' }] } }) +
   ev({ type: 'user', message: { content: [{ type: 'tool_result', content: '[scope-gate] stopped: write@system for /etc/x — a protected path (…)' }] } }) +
-  ev({ type: 'assistant', message: { content: [{ type: 'tool_use', name: 'Edit' }] } }) + '{"type":"assist'
+  ev({ type: 'assistant', message: { content: [{ type: 'text', text: 'The tokenizer drops trailing commas; fixing that first.' }, { type: 'tool_use', name: 'Edit', input: { file_path: '/repo/src/parser/tokenizer.py' } }] } }) + '{"type":"assist'
 if (scenario !== 'empty') {
   job(90000, { task_head: 'very old job' }, sum('done', 90000))
   job(4000, { task_head: 'add retry to uploader' }, sum('rate_limited', 3600))
   job(3000, { task_head: 'write /etc file (guard test)' }, sum('error', 2900, { denials: 1, last_denial: '[scope-gate] stopped: write@system for /etc/sg-test — a protected path' }))
   job(2000, { task_head: 'runner killed mid-way', runner_pid: 999999 })
-  job(400, { task_head: 'fib.py + unittest' }, sum('done', 300))
-  if (scenario !== 'idle') job(72, { task_head: 'refactor parser and add tests for the tokenizer edge cases', runner_pid: sleeper.pid, resume: 'abc' }, { 'out.jsonl': stream })
+  job(400, { task_head: 'fib.py + unittest', model: 'claude-opus-5-5', effort: 'high' }, sum('done', 300, { result_head: 'Created fib.py and test_fib.py; 3 tests pass.' }))
+  if (scenario !== 'idle') job(72, { task_head: 'refactor parser and add tests for the tokenizer edge cases', runner_pid: sleeper.pid, resume: 'abc', model: 'claude-opus-5-5', effort: 'high' }, { 'out.jsonl': stream })
 }
 
-// ── fake bridge + sdk ──
+// ── fake Hermes home: main + coder on amr, researcher on coarena (what the provider lines read) ──
+const hh = process.env.HERMES_HOME
+const cfgOf = (model, provider) => `model:\n  # the model\n  default: "${model}"\n  provider: "${provider}"\n  context_length: 1000\nkanban:\n  x: 1\n`
+fs.mkdirSync(`${hh}/profiles/coder`, { recursive: true }); fs.mkdirSync(`${hh}/profiles/researcher`, { recursive: true })
+fs.writeFileSync(`${hh}/config.yaml`, cfgOf('deepseek-v4.1-flash', 'custom:amr'))
+fs.writeFileSync(`${hh}/profiles/coder/config.yaml`, cfgOf('deepseek-v4.1-flash', 'custom:amr'))
+fs.writeFileSync(`${hh}/profiles/researcher/config.yaml`, cfgOf('kimi-k3-1-pro', 'custom:coarena'))
+
 const store = v => ({ get: () => v, listen: () => () => {} })
-globalThis.__hy = { ui: store({ busy: false, info: { cwd: process.env.HOME + '/repos/hermes-powerline', branch: 'main', model: 'deepseek-v4.1-flash' }, usage: {} }),
-  turn: store({ tools: [], subagents: [] }), overlay: store({ ambient: [] }), patchOverlay() {}, agents: store({}) }
+const busy = scenario === 'busy'
+const turnState = busy
+  ? { tools: [{ name: 'delegate_task', startedAt: Date.now() - 20000 }, { name: 'terminal', startedAt: Date.now() - 3000 }],
+      subagents: [{ id: 's1', goal: 'compare three MCP SDKs', model: 'kimi-k3-1-pro', status: 'running', startedAt: Date.now() / 1000 - 30, toolCount: 3 }],
+      todos: [1, 2, 3, 4, 5, 6].map(i => ({ id: `t${i}`, content: `step ${i} of the plan`, status: i < 3 ? 'completed' : i === 3 ? 'in_progress' : 'pending' })) }
+  : { tools: [], subagents: [] }
+globalThis.__hy = { ui: store({ busy, info: { cwd: process.env.HOME + '/repos/hermes-powerline', branch: 'main', model: 'deepseek-v4.1-flash' }, usage: {} }),
+  turn: store(turnState), overlay: store({ ambient: [] }), patchOverlay() {}, agents: store({}) }
 let app
 const mod = await import(new URL('../widgets/hy-sidebar.mjs', import.meta.url).href)
 mod.default({ Box: ink.Box, Text: ink.Text, React, h: React.createElement, defineWidgetApp: cfg => (app = cfg), openWidget() {} })

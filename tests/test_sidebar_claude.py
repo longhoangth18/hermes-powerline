@@ -47,7 +47,12 @@ def main() -> int:
     f = render(50, "live")
     foot = footer(f)
     check("block sits right under the 󰝰 cwd line", len(foot) > 1 and "claude" in foot[1], f)
-    check("live: header lit with a spinner, turns, last tool, time", any("claude  3 turns · Edit ·" in l for l in foot), f)
+    check("live: header lit with a spinner, the model·effort and the run time", any("claude  opus-5-5·high · 1m13" in l for l in foot), f)
+    check("live: an activity row says what Claude does now (tool, file, turn)",
+          any(l.lstrip().startswith("› Edit parser/tokenizer.py") and l.rstrip().endswith("turn 3") for l in foot), f)
+    check("live: Claude's last words, quoted", any("“The tokenizer drops trailing comm" in l for l in foot), f)
+    check("the other provider's line sits under the claude block, model from the config",
+          foot[-2].strip() == "◇ coarena  kimi-k3-1-pro · researcher", f)
     check("live: the running job's row carries resume ↻ and its denial ✗1", any("refactor parser" in l and "↻ ✗1" in l for l in foot), f)
     check("history: done row shows run time and age", any("✓ fib.py + unittest" in l and "14s · " in l for l in foot), f)
     check("history: a dead runner reads lost, not running", any(l.lstrip().startswith("? runner killed") and "lost" in l for l in foot), f)
@@ -59,7 +64,7 @@ def main() -> int:
 
     f = render(20, "live")
     foot = footer(f)
-    check("short rail: history goes first, live row and denial stay",
+    check("short rail: history goes first, live task and denial stay (denial outlasts the activity row)",
           any("refactor parser" in l for l in foot) and any("write@system" in l for l in foot) and not any("fib.py" in l for l in foot), f)
 
     f = render(14, "live")
@@ -69,15 +74,23 @@ def main() -> int:
 
     f = render(40, "idle")
     foot = footer(f)
-    check("idle: dim chip, today's count", any("✻ claude  idle · 4 today" in l for l in foot), f)
+    check("idle: dim chip, the model last used, today's count", any("✻ claude  opus-5-5·high · 4 today" in l for l in foot), f)
 
     f = render(40, "empty")
     foot = footer(f)
-    check("never used: just ✻ claude idle", len(foot) == 3 and foot[1].strip() == "✻ claude  idle", f)
+    check("never used: just ✻ claude idle, then the idle provider line",
+          len(foot) == 4 and foot[1].strip() == "✻ claude  idle" and foot[2].strip().startswith("◇ coarena"), f)
+
+    f = render(40, "busy")
+    foot = footer(f)
+    check("busy: the researcher route at work lights coarena with its model and routes",
+          any("coarena  kimi-k3-1-pro · researcher" in l and not l.lstrip().startswith("◇") for l in foot), f)
+    check("busy: the goal the coarena route works on, under it", foot[-2].strip() == "› compare three MCP SDKs", f)
+    check("busy: no line is wider than the rail (40 cells)", all(len(l) <= 40 for l in foot), f)
 
     f = render(40, "finish")
     foot = footer(f)
-    check("finish: the chip flashes done", any("✓ claude  done" in l for l in foot), f)
+    check("finish: the chip flashes done", any("✓ claude  opus-5-5·high · done" in l for l in foot), f)
     check("finish: the job moves to history as 'now'", any("refactor parser" in l and l.rstrip().endswith("now") for l in foot), f)
 
     print("ALL PASS" if not fails else f"{fails} FAILED")
