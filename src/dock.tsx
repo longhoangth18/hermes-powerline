@@ -4,22 +4,26 @@
 // Appended to components/agentsPanel.tsx at build time (stock AgentsPanelView is
 // renamed to AgentsPanelViewClassic; HERMES_POWERLINE_DOCK=0 renders that one).
 //
-//    PROCESSES  3 running                               ^T expand · ^R collapse
-//   ⠼ A3-resume  chờ bài đang chạy (a3_g38) xong          ccbsn-research · 12m
-//   ✓ robust  chạy 2 bài chống trượt giá        exit 0 · 20s ago · ccbsn-research
+//    PROCESSES  2 running · 2 done                          ^T expand  ^R collapse
+//  ▌⠼ A3-resume  chờ bài đang chạy (a3_g38) xong                 ccbsn-research
+//  ▌⠼ ./run_job.sh jobs/a3_g42.ini  › profit 45.75      ccbsn-research  󰔛 12m34s
+//  ▌✓ robust  chạy 2 bài chống trượt giá          ccbsn-research   exit 0 · 20s
 //
-// A process is named by what its command says about itself (the first
-// `echo "[tag] text"`, else the command without its leading `cd dir &&`); the
-// directory and the time sit in a right-hand column. Dark band (xterm 235: exact
-// on 256-colour terminals), chips in the bar's colours.
+// Powerline header like the bar, a state-coloured edge per row, the process named
+// by what its command says about itself (its first `echo "[tag] text"`, else the
+// command minus its leading `cd dir &&`), tag as a rounded pill, last output dim,
+// and a right-hand column: directory, run time, or the exit verdict as a pill.
+// Colours are exact xterm-256 greys where it matters (Termius/tmux round the rest).
 // ═══════════════════════════════════════════════════════════════════════
 import type { ReactNode as __PldNode } from 'react'
 
 const PLD = {
-  band: '#262626',
-  comment: '#6272A4',
-  dark: '#191A21',
-  dim: '#9AA5CE',
+  band: '#262626', // xterm 235
+  seg: '#3A3A3A', // xterm 237
+  comment: '#8787AF',
+  cyan: '#8BE9FD',
+  dark: '#1C1C1C',
+  dim: '#BCBCBC',
   fg: '#F8F8F2',
   green: '#50FA7B',
   orange: '#FFB86C',
@@ -28,19 +32,32 @@ const PLD = {
   yellow: '#F1FA8C'
 }
 
+const PLD_NF = (globalThis as { __plIcons?: boolean }).__plIcons !== false
+const PLD_I = PLD_NF
+  ? { agents: '\u{f0010} ', arrow: '', clock: '\u{f051b} ', dir: ' ', l: '', procs: ' ', r: '' }
+  : { agents: '', arrow: '', clock: '', dir: '', l: '', procs: '', r: '' }
 const PLD_SPIN = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 const PLD_HOME = process.env.HOME ?? ''
 
 const pldSpin = () => PLD_SPIN[Math.floor(Date.now() / 1000) % PLD_SPIN.length]!
 
-const pldTime = (s: number) => (s >= 1 ? fmtDuration(s) : '')
+const pldClock = (s: number) => {
+  const m = Math.floor(s / 60)
 
-/** "/Users/x/ccbsn-research" → "ccbsn-research"; "~/a/b/c" → "b/c". */
+  return s < 60 ? `${s}s` : m < 60 ? `${m}m${String(s % 60).padStart(2, '0')}` : `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}`
+}
+
+/** "/Users/x/ccbsn-research" → "ccbsn-research"; deeper paths keep their last two parts. */
 const pldDir = (dir: string): string => {
-  const d = dir.replace(/^["']|["']$/g, '').replace(PLD_HOME ? new RegExp(`^${PLD_HOME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`) : /^$/, '~')
-  const parts = d.split('/').filter(Boolean)
+  let d = dir.replace(/^["']|["']$/g, '')
 
-  return parts.length > 2 ? parts.slice(-2).join('/') : d
+  if (PLD_HOME && d.startsWith(PLD_HOME)) {
+    d = '~' + d.slice(PLD_HOME.length)
+  }
+
+  const parts = d.split('/').filter(p => p && p !== '~')
+
+  return parts.length ? parts.slice(-2).join('/') : d
 }
 
 /** What a background command is, for a person: { tag, title, dir }. */
@@ -55,9 +72,7 @@ export const pldDescribe = (command: string): { dir: string; tag: string; title:
   }
 
   const echo = /\becho\s+(?:-[ne]+\s+)?("([^"]*)"|'([^']*)')/.exec(cmd)
-  let title = echo ? (echo[2] ?? echo[3] ?? '') : ''
-  title = title.replace(/\$\([^)]*\)/g, '').replace(/\s+/g, ' ').trim()
-
+  let title = (echo ? (echo[2] ?? echo[3] ?? '') : '').replace(/\$\([^)]*\)/g, '').replace(/\s+/g, ' ').trim()
   let tag = ''
   const t = /^\[([^\]]{1,24})\]\s*/.exec(title)
 
@@ -66,92 +81,166 @@ export const pldDescribe = (command: string): { dir: string; tag: string; title:
     title = title.slice(t[0].length)
   }
 
-  if (!title) {
-    title = cmd || command
-  }
-
-  return { dir, tag, title }
+  return { dir, tag, title: title || cmd || command }
 }
 
-function PldChip({ bg, text }: { bg: string; text: string }) {
+/** A rounded pill: caps in the pill's colour on the band, text dark on the pill. */
+function PldPill({ bg, children, fg = PLD.dark }: { bg: string; children: string; fg?: string }) {
   return (
-    <Text backgroundColor={bg} bold color={PLD.dark}>
-      {` ${text} `}
-    </Text>
+    <>
+      <Text color={bg}>{PLD_I.l}</Text>
+      <Text backgroundColor={bg} bold color={fg}>{PLD_NF ? children : ` ${children} `}</Text>
+      <Text color={bg}>{PLD_I.r}</Text>
+    </>
   )
 }
 
-/** One full-width row: left part truncates, right part keeps its width. */
-function PldRow({ cols, left, right, rightColor = PLD.comment }: { cols: number; left: __PldNode; right: string; rightColor?: string }) {
-  const rw = right ? Math.min(stringWidth(right) + 1, Math.max(0, Math.floor(cols / 2))) : 0
+/** One full-width row: a state-coloured edge, a left part that truncates, a right part that keeps its width. */
+function PldRow({ cols, edge, left, right, rightW }: { cols: number; edge?: string; left: __PldNode; right?: __PldNode; rightW: number }) {
+  const rw = right ? Math.min(rightW + 1, Math.max(0, Math.floor(cols / 2))) : 0
 
   return (
     <Box flexDirection="row" width={cols}>
+      {edge ? <Text color={edge}>{'▌ '}</Text> : <Text>{'  '}</Text>}
       <Box flexGrow={1} flexShrink={1} overflow="hidden">
         <Text wrap="truncate-end">{left}</Text>
       </Box>
       {rw ? (
-        <Box flexShrink={0} width={rw}>
-          <Text color={rightColor} wrap="truncate-start">{` ${right}`}</Text>
+        <Box flexShrink={0} justifyContent="flex-end" width={rw}>
+          <Text wrap="truncate-start">{right}</Text>
         </Box>
       ) : null}
     </Box>
   )
 }
 
-const pldHints = (s: string) => s.replace(/^\s*·\s*/, '').replace(/Ctrl\+/g, '^')
+/** Powerline header: [icon TITLE][counts] arrows, keyboard hints on the right. */
+function PldHeader({ bg, cols, count, hint, title }: { bg: string; cols: number; count: string; hint: string; title: string }) {
+  const keys = hint
+    .replace(/^\s*·\s*/, '')
+    .split(/\s*·\s*/)
+    .filter(Boolean)
+    .map(k => k.replace(/^Ctrl\+(\w)\s*/, '^$1 '))
+  const right = (
+    <>
+      {keys.map((k, i) => {
+        const [key, ...word] = k.split(' ')
 
-function PldProcess({ cols, row }: { cols: number; row: ProcessRow }) {
-  const d = pldDescribe(row.command)
-  const running = row.status === 'running'
-  const mark = running
-    ? { color: PLD.orange, glyph: pldSpin() }
-    : row.status === 'done'
-      ? { color: PLD.green, glyph: '✓' }
-      : row.status === 'lost'
-        ? { color: PLD.dim, glyph: '?' }
-        : { color: PLD.red, glyph: '×' }
-  // Running: the last output line (dim) after the title; the right column has dir · time.
-  // Finished: the verdict ("exit 0 · 20s ago") on the right, in the outcome's colour.
-  const last = running && row.detail.startsWith('last: ') ? row.detail.slice(6) : ''
-  const right = running ? [d.dir, pldTime(row.elapsedSeconds)].filter(Boolean).join(' · ') : [row.detail, d.dir].filter(Boolean).join(' · ')
+        return (
+          <Text key={k}>
+            <Text backgroundColor={PLD.seg} bold color={PLD.fg}>{` ${key} `}</Text>
+            <Text color={PLD.comment}>{` ${word.join(' ')}${i < keys.length - 1 ? '  ' : ''}`}</Text>
+          </Text>
+        )
+      })}
+    </>
+  )
+  const rightW = keys.reduce((n, k) => n + stringWidth(k) + 3, 0)
 
   return (
     <PldRow
       cols={cols}
       left={
         <>
-          <Text color={mark.color}>{` ${mark.glyph} `}</Text>
-          {d.tag ? <Text bold color={PLD.purple}>{`${d.tag}  `}</Text> : null}
-          <Text color={running ? PLD.fg : PLD.dim}>{d.title}</Text>
-          {last ? <Text color={PLD.comment}>{`  › ${last}`}</Text> : null}
+          <Text backgroundColor={bg} bold color={PLD.dark}>{` ${PLD_I.procs && title === 'PROCESSES' ? PLD_I.procs : title === 'AGENTS' ? PLD_I.agents : ''}${title} `}</Text>
+          <Text backgroundColor={PLD.seg} color={bg}>{PLD_I.arrow}</Text>
+          <Text backgroundColor={PLD.seg} bold color={PLD.fg}>{` ${count} `}</Text>
+          <Text color={PLD.seg}>{PLD_I.arrow || ' '}</Text>
+        </>
+      }
+      right={keys.length ? right : undefined}
+      rightW={rightW}
+    />
+  )
+}
+
+function PldProcess({ cols, row }: { cols: number; row: ProcessRow }) {
+  const d = pldDescribe(row.command)
+  const running = row.status === 'running'
+  const state = running
+    ? { color: PLD.orange, glyph: pldSpin() }
+    : row.status === 'done'
+      ? { color: PLD.green, glyph: '✓' }
+      : row.status === 'lost'
+        ? { color: PLD.comment, glyph: '?' }
+        : { color: PLD.red, glyph: '×' }
+  const last = running && row.detail.startsWith('last: ') ? row.detail.slice(6) : ''
+  const time = running && row.elapsedSeconds >= 1 ? pldClock(row.elapsedSeconds) : ''
+  const verdict = running ? '' : row.detail.replace(/(\d+)s ago$/, '$1s')
+  const dirTxt = d.dir ? `${PLD_I.dir}${d.dir}` : ''
+  const right = (
+    <>
+      {dirTxt ? <Text color={PLD.comment}>{dirTxt}</Text> : null}
+      {time ? <Text bold color={PLD.cyan}>{`  ${PLD_I.clock}${time}`}</Text> : null}
+      {verdict ? (
+        <>
+          <Text>{'  '}</Text>
+          <PldPill bg={row.status === 'done' ? PLD.green : state.color}>{verdict}</PldPill>
+        </>
+      ) : null}
+    </>
+  )
+  const rightW = stringWidth(dirTxt) + (time ? stringWidth(`  ${PLD_I.clock}${time}`) : 0) + (verdict ? stringWidth(verdict) + 2 + (PLD_NF ? 2 : 2) : 0)
+
+  return (
+    <PldRow
+      cols={cols}
+      edge={state.color}
+      left={
+        <>
+          <Text bold color={state.color}>{`${state.glyph} `}</Text>
+          {d.tag ? (
+            <>
+              <PldPill bg={PLD.purple}>{d.tag}</PldPill>
+              <Text> </Text>
+            </>
+          ) : null}
+          <Text bold={running} color={running ? PLD.fg : PLD.dim}>{d.title}</Text>
+          {last ? <Text color={PLD.comment} italic>{`  › ${last}`}</Text> : null}
         </>
       }
       right={right}
-      rightColor={running || row.status === 'done' ? PLD.comment : mark.color}
+      rightW={rightW}
     />
   )
 }
 
 function PldAgent({ cols, row, t }: { cols: number; row: AgentRows['rows'][number]; t: Theme }) {
-  const live = row.status === 'running' || row.status === 'queued' || row.status === 'dispatched' || row.status === 'finalizing'
-  const g = live ? { color: PLD.orange, glyph: pldSpin() } : statusGlyph(row.status, t)
+  const live = ['dispatched', 'finalizing', 'queued', 'running'].includes(row.status)
+  const g = live ? { color: PLD.purple, glyph: pldSpin() } : statusGlyph(row.status, t)
+  const time = row.elapsedSeconds == null ? '' : pldClock(Math.round(row.elapsedSeconds))
+  const id = row.id ? `@${row.id}` : ''
 
   return (
     <Box flexDirection="column">
       <PldRow
         cols={cols}
+        edge={g.color}
         left={
           <>
-            <Text color={g.color}>{` ${g.glyph} `}</Text>
-            {row.name ? <Text bold color={PLD.purple}>{`${row.name} › `}</Text> : null}
-            <Text color={live ? PLD.fg : PLD.dim}>{row.goal}</Text>
+            <Text bold color={g.color}>{`${g.glyph} `}</Text>
+            {row.name ? (
+              <>
+                <PldPill bg={PLD.purple}>{row.name}</PldPill>
+                <Text> </Text>
+              </>
+            ) : null}
+            <Text bold={live} color={live ? PLD.fg : PLD.dim}>{row.goal}</Text>
           </>
         }
-        right={[row.id ? `@${row.id}` : '', row.elapsedSeconds == null ? '' : fmtDuration(row.elapsedSeconds)].filter(Boolean).join(' · ')}
+        right={
+          <>
+            {id ? <Text color={PLD.comment}>{id}</Text> : null}
+            {time ? <Text bold color={PLD.cyan}>{`  ${PLD_I.clock}${time}`}</Text> : null}
+          </>
+        }
+        rightW={stringWidth(id) + (time ? stringWidth(`  ${PLD_I.clock}${time}`) : 0)}
       />
       {row.detail ? (
-        <Text color={PLD.comment} wrap="truncate-end">{`   ↳ ${compactPreview(row.detail, Math.max(8, cols - 5))}`}</Text>
+        <Box flexDirection="row" width={cols}>
+          <Text color={g.color}>{'▌ '}</Text>
+          <Text color={PLD.comment} wrap="truncate-end">{`  ╰─ ${compactPreview(row.detail, Math.max(8, cols - 8))}`}</Text>
+        </Box>
       ) : null}
     </Box>
   )
@@ -170,23 +259,12 @@ export function AgentsPanelView(props: AgentRows & { collapsed?: boolean; cols: 
     return null
   }
 
-  const procWord = processes.running ? `${processes.running} running` : processSummary(processes)
-  const header = (chip: string, bg: string, what: string, more: number, hint: string) => (
-    <PldRow
-      cols={cols}
-      left={
-        <>
-          <PldChip bg={bg} text={chip} />
-          <Text bold color={PLD.fg}>{`  ${what}`}</Text>
-          {more ? <Text color={PLD.comment}>{`  +${more} more`}</Text> : null}
-        </>
-      }
-      right={hint}
-    />
-  )
+  const procDone = processes.total - processes.running
+  const procCount = [processes.running ? `${processes.running} running` : '', procDone ? `${procDone} done` : '', processes.hidden ? `+${processes.hidden}` : '']
+    .filter(Boolean)
+    .join(' · ')
 
   if (collapsed) {
-    const parts = [running ? `${running} agents` : '', processes.total ? `procs ${procWord}` : ''].filter(Boolean).join(' · ')
     const first = rows[0]?.goal ?? (processes.rows[0] ? pldDescribe(processes.rows[0].command).title : '')
 
     return (
@@ -195,12 +273,18 @@ export function AgentsPanelView(props: AgentRows & { collapsed?: boolean; cols: 
           cols={cols}
           left={
             <>
-              <PldChip bg={running ? PLD.purple : PLD.green} text={`${pldSpin()} DOCK`} />
-              <Text bold color={PLD.fg}>{`  ${parts}`}</Text>
-              {first ? <Text color={PLD.comment}>{`  › ${first}`}</Text> : null}
+              {running ? (
+                <>
+                  <PldPill bg={PLD.purple}>{`${pldSpin()} ${PLD_I.agents}${running} agents`}</PldPill>
+                  <Text> </Text>
+                </>
+              ) : null}
+              {processes.total ? <PldPill bg={processes.running ? PLD.green : PLD.seg} fg={processes.running ? PLD.dark : PLD.fg}>{`${PLD_I.procs}${procCount}`}</PldPill> : null}
+              {first ? <Text color={PLD.comment} italic>{`  › ${first}`}</Text> : null}
             </>
           }
-          right={pldHints(T.collapsedHint)}
+          right={<Text color={PLD.comment}>{T.collapsedHint.replace(/^\s*·\s*/, '').replace(/Ctrl\+/g, '^')}</Text>}
+          rightW={stringWidth(T.collapsedHint) - 2}
         />
       </Box>
     )
@@ -208,13 +292,11 @@ export function AgentsPanelView(props: AgentRows & { collapsed?: boolean; cols: 
 
   return (
     <Box backgroundColor={PLD.band} flexDirection="column" flexShrink={0} width={cols}>
-      {running ? header('⑂ AGENTS', PLD.purple, `${running} live`, hidden, pldHints(T.expandedHint)) : null}
+      {running ? <PldHeader bg={PLD.purple} cols={cols} count={`${running} live${hidden ? ` · +${hidden}` : ''}`} hint={T.expandedHint} title="AGENTS" /> : null}
       {rows.map(row => (
         <PldAgent cols={cols} key={row.key} row={row} t={t} />
       ))}
-      {processes.total
-        ? header('⚙ PROCESSES', PLD.green, procWord, processes.hidden, running ? '' : pldHints(T.expandedHint))
-        : null}
+      {processes.total ? <PldHeader bg={PLD.green} cols={cols} count={procCount} hint={running ? '' : T.expandedHint} title="PROCESSES" /> : null}
       {processes.rows.map(row => (
         <PldProcess cols={cols} key={row.id} row={row} />
       ))}

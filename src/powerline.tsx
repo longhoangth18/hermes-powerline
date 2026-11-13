@@ -89,6 +89,8 @@ function plLoadConf(): PlConf {
 }
 
 const PL_CONF = plLoadConf()
+// Shared with the restyled dock (src/dock.tsx, another file of the build): same icon choice as the bar.
+;(globalThis as { __plIcons?: boolean }).__plIcons = PL_CONF.icons
 // Glyphs whose width Ink and terminals agree on (1 cell). U+26A0 ⚠ / U+26D3 ⛓
 // measure 2 in Ink but draw as 1 in Terminal.app/tmux, which shifts every cell
 // after them and garbles Ink's incremental repaints.
