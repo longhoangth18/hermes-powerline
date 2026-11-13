@@ -151,6 +151,14 @@ INSERTS = {
         ("      flexShrink={0}\n      justifyContent=\"space-between\"\n      paddingX={1}\n      width={ambientRailWidth(side, overlay.ambient)}",
          "      flexShrink={0}\n      justifyContent=\"space-between\"\n      overflow=\"hidden\"\n      paddingX={1}\n      width={ambientRailWidth(side, overlay.ambient)}"),
     ],
+    # Processes / live-agents dock: stock tints it mix(statusBg, shellDollar, .12) — a truecolor
+    # dark green that a 256-colour terminal (Termius, tmux) rounds to xterm 59 (#5F5F5F), a light
+    # grey slab right on top of the powerline rows. Use xterm 235 (#262626) instead: exact in 256
+    # colours, the same dark as the bar's inner segments in truecolor.
+    "components/agentsPanel.tsx": [
+        ("      backgroundColor={mix(t.color.statusBg, t.color.shellDollar, 0.12)}",
+         "      backgroundColor=\"#262626\""),
+    ],
     # Two-line prompt: the powerline row goes right above the composer's input rows.
     "components/appLayout.tsx": [
         ("{composer.inputBuf.map((line, i) => (",
