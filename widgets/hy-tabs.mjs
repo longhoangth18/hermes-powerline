@@ -129,7 +129,8 @@ export default function register(sdk) {
     const cur = globalThis.__hy?.ui?.get()?.sid
     const now = Date.now()
     const spin = SPIN[Math.floor(now / 90) % SPIN.length]
-    const cols = process.stdout.columns || 100
+    // The prompt zone ends where the full-height right rail starts (hermes-powerline build).
+    const cols = (process.stdout.columns || 100) - (globalThis.__hyRailCols || 0)
 
     // Route chips (right side).
     let states = new Map()

@@ -1818,13 +1818,29 @@ export default function register(sdk) {
     }
 
     const footOn = used + FOOT <= rows
+
+    // Room to spare on a measured rail (it runs the full height of the screen): the claude block
+    // takes what it can still show, and the footer sits at the bottom of the rail.
+    let footGap = 0
+
+    if (footOn && railH > 0) {
+      const grow = Math.min(rows - used - FOOT, claudeFull - claudeN)
+
+      if (grow > 0) {
+        claudeN += grow
+        FOOT += grow
+      }
+
+      footGap = Math.max(0, rows - used - FOOT)
+    }
+
     const claudeRows = claudeBlock(claudeN)
 
     // ── pinned footer: cwd · branch ──
     footOn && nodes.push(
       h(
         Box,
-        { flexDirection: 'column', flexShrink: 0, key: 'foot', marginTop: 1 },
+        { flexDirection: 'column', flexShrink: 0, key: 'foot', marginTop: 1 + footGap },
         info.cwd
           ? h(
               Text,
