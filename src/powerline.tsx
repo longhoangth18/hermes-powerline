@@ -112,6 +112,8 @@ interface PlSeg {
   fixed?: boolean
   /** Idle/secondary cell: dim text, also under the mono palette. */
   muted?: boolean
+  /** Long pinned text (model, inbox, context) that may be shortened — or dropped — to fit the row. */
+  trunc?: boolean
   w: number
 }
 
@@ -311,6 +313,9 @@ function usePlTodos(): null | PlTodos {
     let linger: ReturnType<typeof setTimeout> | undefined
     let shown: null | PlTodoItem[] = null
     let shownLive = false
+    // A list Hermes left behind (interrupt, API error) that already lingered and went away: it stays
+    // gone — also when the next turn starts — until Hermes posts a different list.
+    let dismissed: null | PlTodoItem[] = null
     let sid = ui?.get?.()?.sid ?? null
 
     const stopLinger = () => {
@@ -329,11 +334,12 @@ function usePlTodos(): null | PlTodos {
         sid = nowSid
         stopLinger()
         shown = null
+        dismissed = null
         setTodos(null)
       }
 
       const raw = store.get?.()?.todos
-      const list = Array.isArray(raw) ? raw : []
+      const list = Array.isArray(raw) && raw !== dismissed ? raw : []
       // Live while the session works. After an interrupt Hermes does not archive the list, so an
       // idle session with a list left over counts as finished (dim, then gone).
       const live = list.length > 0 && (u ? !!u.busy : true)
@@ -359,6 +365,13 @@ function usePlTodos(): null | PlTodos {
         setTodos({ items: last, live: false })
         linger = setTimeout(() => {
           linger = undefined
+          // Still the same list sitting in the store (not archived)? Then it is done for.
+          const left = store.get?.()?.todos
+
+          if (Array.isArray(left) && left === shown) {
+            dismissed = left
+          }
+
           shown = null
           setTodos(null)
         }, PL_TODO_LINGER_MS)
@@ -956,6 +969,23 @@ const __plSidebarOpen = (): boolean => {
   }
 }
 
+/** Sidebar open/closed as React state: the status row is memoised and listens to $uiState only, so
+ *  reading the overlay during render went stale after /hy-sidebar or the auto-open on resize. */
+function usePlSidebarOpen(): boolean {
+  const [open, setOpen] = useState(__plSidebarOpen)
+
+  useEffect(() => {
+    const ov = (globalThis as { __hy?: { overlay?: { listen?: (cb: () => void) => () => void } } }).__hy?.overlay
+    const sync = () => setOpen(__plSidebarOpen())
+
+    sync()
+
+    return ov?.listen?.(sync)
+  }, [])
+
+  return open
+}
+
 function PowerlineRule(p: StatusRuleProps) {
   const { busy, cols, t, usage } = p
   const net = usePlNet()
@@ -973,7 +1003,7 @@ function PowerlineRule(p: StatusRuleProps) {
   // With the hy sidebar open, cells it already shows (model, context, cache, title/folder/
   // branch, compressions, subagents) leave the bar — no duplicated information. The sidebar
   // hides itself on narrow terminals, and then the bar shows everything again.
-  const sideOpen = __plSidebarOpen()
+  const sideOpen = usePlSidebarOpen()
   const ok = (name: string) =>
     (p.statusBarFields == null || p.statusBarFields.has(name)) && !(sideOpen && PL_SIDEBAR_DUPES.has(name))
 
@@ -1014,6 +1044,12 @@ function PowerlineRule(p: StatusRuleProps) {
       />
     )
 
+    // While compacting, FaceTicker shows the override verb even for verb-less styles (padded to
+    // VERB_PAD_LEN); busyIndicatorWidth does not count it. Over-estimate rather than overflow.
+    const faceW =
+      busyIndicatorWidth(style, p.turnStartedAt != null) +
+      (p.compacting ? 1 + Math.max(VERB_PAD_LEN, stringWidth(`${T.status.compacting}…`)) : 0)
+
     pinned.push({
       bg: C.busy,
       bold: true,
@@ -1021,7 +1057,7 @@ function PowerlineRule(p: StatusRuleProps) {
       key: 'status',
       node: face(dark),
       render: bg => face(__plInk(bg)),
-      w: busyIndicatorWidth(style, p.turnStartedAt != null)
+      w: faceW
     })
   } else if (showNotice) {
     const raw = p.notice!.text
@@ -1136,7 +1172,7 @@ function PowerlineRule(p: StatusRuleProps) {
       ? `${icon}${inbox.kinds}${inbox.undelivered ? `·${inbox.undelivered} result` : ''}`
       : `${icon}${inbox.undelivered} result`
 
-    pinned.push({ bg: attn ? '#FF8700' : '#5F87D7', bold: attn, fg: dark, fixed: true, key: 'inbox', node: txt, w: stringWidth(txt) })
+    pinned.push({ bg: attn ? '#FF8700' : '#5F87D7', bold: attn, fg: dark, fixed: true, key: 'inbox', node: txt, trunc: true, w: stringWidth(txt) })
   }
 
   if (DEV_CREDITS_MODE) {
@@ -1146,7 +1182,7 @@ function PowerlineRule(p: StatusRuleProps) {
   const modelText = `${ic('\u{f0674}')}${modelLabel(p.model, p.modelReasoningEffort, p.modelFast, p.modelReasoningEffortWire)}`
 
   if (ok('model')) {
-    pinned.push({ bg: C.model, bold: true, fg: dark, key: 'model', node: modelText, w: stringWidth(modelText) })
+    pinned.push({ bg: C.model, bold: true, fg: dark, key: 'model', node: modelText, trunc: true, w: stringWidth(modelText) })
   }
 
   // Context: token count always; the meter + % is optional (budgeted below).
@@ -1209,7 +1245,7 @@ function PowerlineRule(p: StatusRuleProps) {
   if (ctxLabel) {
     const txt = `${ic('\u{f01bc}')}${ctxLabel}` // nf-md-database
 
-    ctxSeg = { bg: C.ctxBg, fg: light, key: 'ctx', node: txt, w: stringWidth(txt) }
+    ctxSeg = { bg: C.ctxBg, fg: light, key: 'ctx', node: txt, trunc: true, w: stringWidth(txt) }
 
     if (pinnedW() + segW(ctxSeg.w) <= width) {
       const modelAt = pinned.findIndex(s => s.key === 'model')
@@ -1309,6 +1345,26 @@ function PowerlineRule(p: StatusRuleProps) {
   const blockWidth = () => (sharedW > 0 ? rCells.reduce((n, c) => n + stringWidth(c.text) + sepW, 0) + durPart : 0)
   const overBy = () => pinnedW() + blockWidth() + 1 - width
 
+  // Give way in this order, re-checking after each step: (1) todo/task cells drop their words
+  // ("0 tasks" → "0"), (2) the title/folder cell is shortened, (3) idle todo/task cells leave,
+  // (4) block cells leave from the left (never the clock), (5) long pinned cells shorten (below).
+  if (overBy() > 0) {
+    for (const x of shrink) {
+      x.seg.node = x.short
+      x.seg.w = stringWidth(x.short)
+    }
+  }
+
+  const first = rCells[0]
+
+  if (overBy() > 0 && first?.trunc) {
+    const keep = stringWidth(first.text) - overBy()
+
+    if (keep >= 8) {
+      first.text = `${plTruncEnd(first.text.trimEnd(), keep - 1)} `
+    }
+  }
+
   for (const x of shrink) {
     if (x.idle && overBy() > 0 && pinned.includes(x.seg)) {
       pinned.splice(pinned.indexOf(x.seg), 1)
@@ -1316,14 +1372,41 @@ function PowerlineRule(p: StatusRuleProps) {
   }
 
   while (overBy() > 0 && rCells.length) {
-    const first = rCells[0]!
-    const keep = stringWidth(first.text) - overBy()
+    const cell = rCells[0]!
+    const keep = stringWidth(cell.text) - overBy()
 
-    // Only the title / folder cell is shortened; quota and git cells are whole or gone.
-    if (first.trunc && keep >= 8) {
-      first.text = `${plTruncEnd(first.text.trimEnd(), keep - 1)} `
+    if (cell.trunc && keep >= 8) {
+      cell.text = `${plTruncEnd(cell.text.trimEnd(), keep - 1)} `
     } else {
       rCells.shift()
+    }
+  }
+
+  // Last resort: the long pinned cells (model name, inbox detail, context) shorten — longest first —
+  // or leave, so row 1 never overflows into a clipped, half-drawn row.
+  for (const seg of pinned.filter(x => x.trunc).sort((a, b) => b.w - a.w)) {
+    const over = overBy()
+
+    if (over <= 0) {
+      break
+    }
+
+    const keep = seg.w - over
+
+    if (keep >= 6 && typeof seg.node === 'string') {
+      const cut = plTruncEnd(seg.node, keep)
+
+      seg.node = cut
+      seg.w = stringWidth(cut)
+    } else {
+      pinned.splice(pinned.indexOf(seg), 1)
+    }
+  }
+
+  // Still too wide (very narrow terminal + busy face + API error): working todo/task cells go too.
+  for (const x of shrink) {
+    if (overBy() > 0 && pinned.includes(x.seg)) {
+      pinned.splice(pinned.indexOf(x.seg), 1)
     }
   }
 
@@ -1550,16 +1633,19 @@ function PowerlineRule(p: StatusRuleProps) {
   // merged roster; without it (older bridge) the stock count stays, since it sees background work.
   const ownTasks = todoOn && !!tasks?.merged
 
-  if (subagents > 0 && ok('bg_subagents')) {
-    if (!ownTasks) {
-      add({ bg: deep, fg: t.color.label, key: 'subagents', node: `${PL_LINK} ${subagents}`, w: stringWidth(`${PL_LINK} ${subagents}`) })
-    }
+  if (subagents > 0 && ok('bg_subagents') && !ownTasks) {
+    add({ bg: deep, fg: t.color.label, key: 'subagents', node: `${PL_LINK} ${subagents}`, w: stringWidth(`${PL_LINK} ${subagents}`) })
+  }
 
-    // Idle while delegated work runs: say the session resumes when it finishes — with the same
-    // count the task cell shows (Hermes' own figure also counts the delegation record).
+  // Idle while delegated work runs: say the session resumes when it finishes — with the same count
+  // the task cell shows (Hermes' own figure also counts the delegation record). The sidebar has no
+  // such line, so it stays when the sidebar is open; only the user's field list can hide it.
+  const fieldOn = p.statusBarFields == null || p.statusBarFields.has('bg_subagents')
+
+  {
     const waiting = ownTasks ? tasks!.n : subagents
 
-    if (!busy && waiting > 0) {
+    if (fieldOn && !busy && waiting > 0) {
       const hint = waiting === 1 ? T.status.resumesWhenSubagentFinishes : T.status.resumesWhenSubagentsFinish(waiting)
 
       add({ bg: deep, fg: t.color.muted, key: 'resume', node: hint, w: stringWidth(hint) })

@@ -122,7 +122,7 @@ SPECS = [
      ("function FaceTicker(", "function SessionDuration(", "const modelLabel =",
       "function ctxBarColor(", "function batteryLabel(", "function batteryColor(", "function noticeColor(",
       "function SpawnHud(", "function displayStatus(", "interface StatusRuleProps",
-      "export const busyIndicatorWidth", "export const MAX_DURATION_WIDTH", "statusSessionCountLabel",
+      "export const busyIndicatorWidth", "export const VERB_PAD_LEN", "export const MAX_DURATION_WIDTH", "statusSessionCountLabel",
       "$isStatusRuleOccluded", "fmtDuration", "compactNumber", "DEV_CREDITS_MODE", "stringWidth"), True),
     ("lib/prompt.ts", "prompt.ts",
      "export function composerPromptText(", "function composerPromptTextClassic(", (), True),

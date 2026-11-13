@@ -28,6 +28,7 @@ Never raises: any failure leaves the tool call alone.
 """
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -143,12 +144,20 @@ def _wants_edit(tool_name: str, args: Any) -> bool:
     if tool_name in _EDIT_TOOLS:
         return True
     if tool_name == "delegate_task":
-        tasks = a.get("tasks") if isinstance(a.get("tasks"), list) else [a]
-        top = str(a.get("profile") or "").strip()
+        tasks = a.get("tasks")
+        if isinstance(tasks, str):  # Hermes accepts a JSON-array string too
+            try:
+                tasks = json.loads(tasks)
+            except ValueError:
+                tasks = None
+        # A legacy top-level `goal` is wrapped into one task WITHOUT any profile (a top-level `profile`
+        # is ignored by Hermes), so it runs on the default route.
+        if not isinstance(tasks, list):
+            tasks = [{"goal": a.get("goal")}]
 
         def route(t: Any) -> str:
             own = str(t.get("profile") or "").strip() if isinstance(t, dict) else ""
-            return own or top or _default_route()
+            return own or _default_route()
 
         return any(route(t) == _CODE_ROUTE for t in tasks)
     if tool_name == "tool_call":  # Tool Search's dispatcher: judge the inner calls

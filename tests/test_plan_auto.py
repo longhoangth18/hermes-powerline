@@ -82,7 +82,15 @@ check("delegate without profile → default coder → blocked", blocked("delegat
 reset("research Y")
 check("delegate to researcher passes", blocked("delegate_task", {"tasks": [{"goal": "y", "profile": "researcher"}]}), False)
 reset("research Y")
-check("top-level profile coder is blocked", blocked("delegate_task", {"goal": "y", "profile": "coder"}), True)
+check("legacy top-level goal runs on the default route → blocked", blocked("delegate_task", {"goal": "y"}), True)
+reset("research Y")
+check("top-level profile is ignored by Hermes → still default coder → blocked",
+      blocked("delegate_task", {"goal": "y", "profile": "researcher"}), True)
+reset("research Y")
+check("tasks as a JSON string, researcher → passes",
+      blocked("delegate_task", {"tasks": '[{"goal": "y", "profile": "researcher"}]'}), False)
+reset("research Y")
+check("tasks as a JSON string, no profile → coder → blocked", blocked("delegate_task", {"tasks": '[{"goal": "y"}]'}), True)
 reset("đọc file")
 check("read tools never blocked", blocked("read_file", {"path": "x"}), False)
 check("terminal not gated", blocked("terminal", {"command": "ls"}), False)

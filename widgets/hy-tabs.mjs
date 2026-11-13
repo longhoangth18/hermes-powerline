@@ -31,7 +31,22 @@ const FALLBACK = {
 const roster = () => (Array.isArray(globalThis.__hySessions) ? globalThis.__hySessions : null)
 const hasBridge = () => Boolean(globalThis.__hy?.ui?.get) && roster() !== null
 const theme = () => ({ ...FALLBACK, ...(globalThis.__hy?.theme ?? {}) })
-const busy = s => s?.status === 'working' || s?.status === 'starting'
+const IN_FLIGHT = new Set(['dispatched', 'finalizing', 'queued', 'running'])
+
+// Delegated work of the session on screen still running (bridge v3 roster: in-turn + background).
+const bgWork = () => {
+  try {
+    const r = globalThis.__hy?.roster?.()
+
+    return Array.isArray(r) && r.some(x => IN_FLIGHT.has(x?.status))
+  } catch {
+    return false
+  }
+}
+
+// A tab spins while its session works — and, for the current tab, while its subagents still run
+// after the turn ended (the bar and sidebar show that work too).
+const busy = (s, isCur = false) => s?.status === 'working' || s?.status === 'starting' || (isCur && bgWork())
 
 const call = (fn, ...args) => {
   try {
@@ -95,7 +110,7 @@ export default function register(sdk) {
 
         const flashing = [...refused.values()].some(t => Date.now() - t < 3000)
 
-        if (next !== sig || flashing || list.some(busy) || routes.includes(':active')) {
+        if (next !== sig || flashing || list.some(x => busy(x)) || bgWork() || routes.includes(':active')) {
           sig = next
           force(n => n + 1)
         }
@@ -162,9 +177,10 @@ export default function register(sdk) {
 
       const bg = isCur ? c.accent : c.surface
       const fg = isCur ? c.deeper : c.fg
-      const glyph = busy(s) ? spin : s.status === 'waiting' ? '?' : '●'
-      const gColor = busy(s) ? (isCur ? c.deeper : c.orange) : s.status === 'waiting' ? (isCur ? c.deeper : c.yellow) : isCur ? c.deeper : c.green
-      const sweep = busy(s) && !isCur ? Math.floor(now / 70) % (name.length + 8) : -99
+      const working = busy(s, isCur)
+      const glyph = working ? spin : s.status === 'waiting' ? '?' : '●'
+      const gColor = working ? (isCur ? c.deeper : c.orange) : s.status === 'waiting' ? (isCur ? c.deeper : c.yellow) : isCur ? c.deeper : c.green
+      const sweep = working && !isCur ? Math.floor(now / 70) % (name.length + 8) : -99
 
       tabs.push(
         h(

@@ -154,11 +154,21 @@ async function readSession(sid) {
           files.set(p, f)
         }
       } else if (fn === 'delegate_task') {
-        const top = typeof args.profile === 'string' && args.profile ? args.profile : ''
+        // `tasks` may arrive as a JSON string (Hermes parses it); a legacy top-level `goal` is wrapped
+        // into one task WITHOUT any profile, so it runs on the default route.
+        let list = args.tasks
 
-        for (const t of Array.isArray(args.tasks) ? args.tasks : [args]) {
+        if (typeof list === 'string') {
+          try {
+            list = JSON.parse(list)
+          } catch {
+            list = null
+          }
+        }
+
+        for (const t of Array.isArray(list) ? list : [{ goal: args.goal }]) {
           if (t && typeof t.goal === 'string') {
-            delegations.push({ goal: t.goal, profile: typeof t.profile === 'string' && t.profile ? t.profile : (top || routeConfig().def || 'default') })
+            delegations.push({ goal: t.goal, profile: typeof t.profile === 'string' && t.profile ? t.profile : routeConfig().def || 'default' })
           }
         }
       }
@@ -298,6 +308,9 @@ function routesList() {
   }
 }
 
+// The session the TUI shows right now (stored id first: that is what state.db knows).
+const currentSid = ui => ui?.storedSid || ui?.info?.stored_session_id || ui?.sid || null
+
 function startLoader() {
   if (loader.started) {
     return
@@ -308,7 +321,7 @@ function startLoader() {
 
   const run = async () => {
     const ui = bridge()?.ui.get()
-    const sid = ui?.storedSid || ui?.info?.stored_session_id || ui?.sid || null
+    const sid = currentSid(ui)
 
     if (sid !== globalThis.__hyData.sid) {
       globalThis.__hyData = { data: null, routes: globalThis.__hyData.routes, sid }
@@ -340,8 +353,18 @@ function startLoader() {
     // Turn ended (busy → idle): children and tool results just landed in state.db.
     let wasBusy = false
 
+    let lastSid = currentSid(b.ui.get())
+
     b.ui.listen(ui => {
-      if (wasBusy && !ui?.busy) {
+      const sid = currentSid(ui)
+
+      // Switched session (tab, ^X, /new): read the new one now, not at the next idle poll.
+      if (sid !== lastSid) {
+        lastSid = sid
+        clearTimeout(loader.timer)
+        loader.timer = setTimeout(run, 50)
+        loader.timer.unref?.()
+      } else if (wasBusy && !ui?.busy) {
         clearTimeout(loader.timer)
         loader.timer = setTimeout(run, 800)
         loader.timer.unref?.()
@@ -448,6 +471,54 @@ export default function register(sdk) {
     const str = String(s ?? '')
 
     return str.length > w ? str.slice(0, Math.max(0, w - 1)) + '…' : str
+  }
+
+  // Terminal cells of one code point: wide CJK / Hangul / fullwidth / emoji = 2, combining marks = 0.
+  const cellW = cp =>
+    (cp >= 0x300 && cp <= 0x36f) || cp === 0x200d || (cp >= 0xfe00 && cp <= 0xfe0f)
+      ? 0
+      : (cp >= 0x1100 && cp <= 0x115f) || (cp >= 0x2e80 && cp <= 0xa4cf) || (cp >= 0xac00 && cp <= 0xd7a3) ||
+          (cp >= 0xf900 && cp <= 0xfaff) || (cp >= 0xfe30 && cp <= 0xfe4f) || (cp >= 0xff00 && cp <= 0xff60) ||
+          (cp >= 0xffe0 && cp <= 0xffe6) || (cp >= 0x1f300 && cp <= 0x1faff) || (cp >= 0x20000 && cp <= 0x3fffd)
+        ? 2
+        : 1
+
+  // Split text into at most `max` lines of `w` cells; the last line ends in … when text is left.
+  const cellLines = (s, w, max) => {
+    const lines = []
+    let line = ''
+    let lw = 0
+
+    for (const ch of String(s ?? '')) {
+      const cw = cellW(ch.codePointAt(0))
+
+      if (lw + cw > w) {
+        lines.push(line)
+        line = ''
+        lw = 0
+
+        if (lines.length === max) {
+          break
+        }
+      }
+
+      line += ch
+      lw += cw
+    }
+
+    if (lines.length < max && line) {
+      lines.push(line)
+    } else if (lines.length === max && (line || lines.join('').length < [...String(s ?? '')].join('').length)) {
+      const last = [...lines[max - 1]]
+
+      while (last.length && last.reduce((n, ch) => n + cellW(ch.codePointAt(0)), 0) > w - 1) {
+        last.pop()
+      }
+
+      lines[max - 1] = last.join('') + '…'
+    }
+
+    return lines.length ? lines : ['']
   }
 
   const short = n => {
@@ -624,7 +695,21 @@ export default function register(sdk) {
   // ── panel ──────────────────────────────────────────────────────────────
   // Height of the rail this widget sits in: walk up from our root to the rail box (the build clips
   // it with overflow: hidden) and read its laid-out height. 0 = unknown (older build / not mounted).
+  // Inline rendering (no alternate screen: HERMES_TUI_NATIVE, HERMES_TUI_INLINE, Termux default) lets
+  // the rail grow with its content, so its height says nothing about the room left — don't measure.
+  const on = v => /^(1|true|yes|on)$/i.test(String(v ?? '').trim())
+  const off = v => /^(0|false|no|off)$/i.test(String(v ?? '').trim())
+  const INLINE =
+    on(process.env.HERMES_TUI_NATIVE) ||
+    on(process.env.HERMES_TUI_INLINE) ||
+    (!off(process.env.HERMES_TUI_INLINE) && !off(process.env.HERMES_TUI_TERMUX_MODE) &&
+      (Boolean(process.env.TERMUX_VERSION) || String(process.env.PREFIX ?? '').includes('com.termux')))
+
   const railHeight = node => {
+    if (INLINE) {
+      return 0
+    }
+
     for (let n = node?.parentNode, i = 0; n && i < 8; n = n.parentNode, i++) {
       const st = n.style ?? {}
 
@@ -786,10 +871,12 @@ export default function register(sdk) {
       usage.cost_usd ? `$${Number(usage.cost_usd).toFixed(2)}` : ''
     ].filter(Boolean)
 
+    const titleLines = cellLines(title, W, 2)
+
     push(
       h(
         Box,
-        { flexDirection: 'column', key: 'title' },
+        { flexDirection: 'column', flexShrink: 0, key: 'title' },
         h(
           Text,
           { wrap: 'truncate-end' },
@@ -798,7 +885,7 @@ export default function register(sdk) {
           h(Text, { color: c.line }, '\u{e0b0} '),
           status
         ),
-        h(Text, { bold: true, color: c.fg, wrap: 'wrap' }, fit(title, W * 2)),
+        ...titleLines.map((line, i) => h(Text, { bold: true, color: c.fg, key: `t${i}`, wrap: 'truncate-end' }, line)),
         h(
           Text,
           { color: c.dim, wrap: 'truncate-end' },
@@ -818,28 +905,32 @@ export default function register(sdk) {
             ),
         stats.length ? h(Text, { color: c.comment, wrap: 'truncate-end' }, stats.join(' · ')) : null
       ),
-      4 + Math.min(2, Math.ceil(Math.min(title.length, W * 2) / W)) + (stats.length ? 1 : 0)
+      3 + titleLines.length + (stats.length ? 1 : 0)
     )
 
     // ── TODO ── (live list, else the last one this session had, dimmed)
     const liveTodos = turn.todos ?? []
+    // Keyed by the session on screen — hd.sid lags behind a switch until the DB reload lands.
+    const nowSid = currentSid(ui)
 
-    if (liveTodos.length && hd.sid) {
-      lastTodos.set(hd.sid, liveTodos)
+    if (liveTodos.length && nowSid) {
+      lastTodos.set(nowSid, liveTodos)
     }
 
-    const todos = liveTodos.length ? liveTodos : (lastTodos.get(hd.sid) ?? [])
+    const todos = liveTodos.length ? liveTodos : (lastTodos.get(nowSid) ?? [])
     const todoStale = !liveTodos.length
 
     if (todos.length) {
       const done = todos.filter(x => x.status === 'completed').length
+      // Cancelled items are listed (struck through) but not counted — same figure as the bar.
+      const total = Math.max(1, todos.filter(x => x.status !== 'cancelled').length)
       const body = [
         h(
           Text,
           { key: 'tb', wrap: 'truncate-end' },
           h(Text, null, ' '),
-          h(Bar, { c0: c.cyan, c1: c.accent, pct: (done / todos.length) * 100, track: c.surface, width: W - 9 }),
-          h(Text, { bold: true, color: done === todos.length ? c.green : c.orange }, ` ${Math.round((done / todos.length) * 100)}%`)
+          h(Bar, { c0: c.cyan, c1: c.accent, pct: (done / total) * 100, track: c.surface, width: W - 9 }),
+          h(Text, { bold: true, color: done === total ? c.green : c.orange }, ` ${Math.round((done / total) * 100)}%`)
         )
       ]
       // keep the in-progress item in view
@@ -893,8 +984,8 @@ export default function register(sdk) {
         h(Head, {
           c,
           icon: IC.todo,
-          right: `${todoStale ? 'last turn · ' : ''}${done}/${todos.length}`,
-          rightColor: done === todos.length ? c.green : todoStale ? c.dim : c.orange,
+          right: `${todoStale ? 'last turn · ' : ''}${done}/${total}`,
+          rightColor: done === total ? c.green : todoStale ? c.dim : c.orange,
           title: 'TODO'
         }),
         body
@@ -967,7 +1058,9 @@ export default function register(sdk) {
         )
       }
 
-      const activeN = [...states.values()].filter(x => x === 'active').length + subs.filter(s => inFlight(s) && !routeOf(s.goal, data, s.model)).length
+      // Tasks in flight (same count as the bar's task cell); routes lit by DB children only when the
+      // roster has none (e.g. right after a reload).
+      const activeN = subs.filter(inFlight).length || [...states.values()].filter(x => x === 'active').length
 
       section(
         'subs',
@@ -1205,7 +1298,7 @@ export default function register(sdk) {
     footOn && nodes.push(
       h(
         Box,
-        { flexDirection: 'column', key: 'foot', marginTop: 1 },
+        { flexDirection: 'column', flexShrink: 0, key: 'foot', marginTop: 1 },
         info.cwd
           ? h(
               Text,
