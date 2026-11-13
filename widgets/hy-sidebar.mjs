@@ -440,7 +440,7 @@ export default function register(sdk) {
   }
 
   const h = sdk.h ?? React.createElement
-  const { useEffect, useState } = React
+  const { useEffect, useRef, useState } = React
   const W = WIDTH - 2
 
   // ── helpers ────────────────────────────────────────────────────────────
@@ -622,8 +622,44 @@ export default function register(sdk) {
   }
 
   // ── panel ──────────────────────────────────────────────────────────────
+  // Height of the rail this widget sits in: walk up from our root to the rail box (the build clips
+  // it with overflow: hidden) and read its laid-out height. 0 = unknown (older build / not mounted).
+  const railHeight = node => {
+    for (let n = node?.parentNode, i = 0; n && i < 8; n = n.parentNode, i++) {
+      const st = n.style ?? {}
+
+      if ((st.overflow === 'hidden' || st.overflowY === 'hidden') && n.yogaNode) {
+        const hgt = Math.floor(n.yogaNode.getComputedHeight?.() ?? 0)
+
+        return Number.isFinite(hgt) && hgt > 0 ? hgt : 0
+      }
+    }
+
+    return 0
+  }
+
   function Sidebar() {
     const [, force] = useState(0)
+    const rootRef = useRef(null)
+    const [railH, setRailH] = useState(0)
+
+    // After every paint: follow the rail's real height (terminal resize, docks appearing below).
+    useEffect(() => {
+      const hgt = railHeight(rootRef.current)
+
+      if (hgt && hgt !== railH) {
+        setRailH(hgt)
+      }
+    })
+
+    // An idle sidebar does not repaint by itself: re-measure when the terminal is resized.
+    useEffect(() => {
+      const onResize = () => setTimeout(() => force(n => n + 1), 50)
+
+      process.stdout.on?.('resize', onResize)
+
+      return () => process.stdout.off?.('resize', onResize)
+    }, [])
     const b = bridge()
 
     useEffect(() => {
@@ -690,11 +726,16 @@ export default function register(sdk) {
     // Rail height = terminal rows minus the bottom chrome (2 powerline rows, the
     // prompt row(s), the tabs dock) and a safety line — overflowing the rail makes
     // Ink paint sections over each other, so the budget errs on the short side.
-    const rows = Math.max(16, (process.stdout.rows || 40) - 9)
+    // The measured rail height when we have it; otherwise the old estimate.
+    const rows = railH > 0 ? railH : Math.max(8, (process.stdout.rows || 40) - 9)
     const nodes = []
+    const nodeLines = []
+    const nodeTrim = [] // per node: (maxLines) => smaller node | null, for sections that can shed rows
     let used = 0
-    const push = (node, lines) => {
+    const push = (node, lines, trim = null) => {
       nodes.push(node)
+      nodeLines.push(lines)
+      nodeTrim.push(trim)
       used += lines
     }
 
@@ -716,7 +757,19 @@ export default function register(sdk) {
         open
       })
 
-      push(h(Box, { flexDirection: 'column', key, marginTop: 1 }, hd, ...(open ? body : [])), open ? body.length + 2 : 2)
+      // flexShrink 0: when the rail is short, Ink must clip the last section, never squeeze
+      // sections into each other (that paints one section's lines over another's).
+      const build = rows => h(Box, { flexDirection: 'column', flexShrink: 0, key, marginTop: 1 }, hd, ...rows)
+      // Shed rows when the rail is short: keep the header, as many rows as fit, and a "…+N" line.
+      const trim = max => {
+        const n = max - 3 // margin + header + the "…" line
+
+        return open && n >= 1 && n < body.length
+          ? build([...body.slice(0, n), h(Text, { color: c.comment, key: `${key}-more` }, ` …+${body.length - n}`)])
+          : null
+      }
+
+      push(build(open ? body : []), open ? body.length + 2 : 2, trim)
     }
 
     // ── title block ──
@@ -1126,8 +1179,30 @@ export default function register(sdk) {
       )
     }
 
+    // Fit the rail: drop whole sections from the bottom (files, MCP, skills …) until the rest and
+    // the 3-line footer fit; the title block, TODO and SUBAGENTS come first and stay longest.
+    const FOOT = 3
+
+    while (used + FOOT > rows && nodes.length > 1) {
+      const lines = nodeLines.pop()
+      const trim = nodeTrim.pop()
+      nodes.pop()
+      used -= lines
+
+      // The section that crosses the line sheds rows instead of disappearing whole.
+      const room = rows - FOOT - used
+      const smaller = trim && room >= 4 ? trim(room) : null
+
+      if (smaller) {
+        push(smaller, room)
+        break
+      }
+    }
+
+    const footOn = used + FOOT <= rows
+
     // ── pinned footer: cwd · branch ──
-    nodes.push(
+    footOn && nodes.push(
       h(
         Box,
         { flexDirection: 'column', key: 'foot', marginTop: 1 },
@@ -1143,7 +1218,10 @@ export default function register(sdk) {
       )
     )
 
-    return h(Box, { flexDirection: 'column', width: W }, ...nodes)
+    // key = rail height: when the rail resizes, remount the panel so Ink paints it fresh. Otherwise
+    // Ink blits unchanged rows from the previous frame at their old offsets — rows that were clipped
+    // a moment ago come back as stale, overlapping text.
+    return h(Box, { flexDirection: 'column', flexShrink: 0, key: `rail-${rows}`, ref: rootRef, width: W }, ...nodes)
   }
 
   let app

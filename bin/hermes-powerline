@@ -140,6 +140,13 @@ SPECS = [
 ]
 # Extra one-shot insertions (exactly one anchor each), keyed by target file.
 INSERTS = {
+    # Side rails (hy sidebar lives in the right one): clip at the rail's own height. Without it a
+    # rail taller than the space above the prompt zone paints over the process/agents dock and
+    # the powerline rows (Ink draws overflow unless the box hides it).
+    "sdk/host.tsx": [
+        ("      flexShrink={0}\n      justifyContent=\"space-between\"\n      paddingX={1}\n      width={ambientRailWidth(side, overlay.ambient)}",
+         "      flexShrink={0}\n      justifyContent=\"space-between\"\n      overflow=\"hidden\"\n      paddingX={1}\n      width={ambientRailWidth(side, overlay.ambient)}"),
+    ],
     # Two-line prompt: the powerline row goes right above the composer's input rows.
     "components/appLayout.tsx": [
         ("{composer.inputBuf.map((line, i) => (",
